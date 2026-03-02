@@ -8,25 +8,25 @@ AI-powered e-learning platform with real-time attention monitoring, live video t
 
 ### Dashboard
 <p align="center">
-  <img src="demo_file/dashboard.png" width="800">
+  <img src="demo_files/dashboard.png" width="800">
 </p>
 
 ### Video Learning
 <p align="center">
-  <img src="demo_file/video_learning.png" width="800">
+  <img src="demo_files/video_learning.png" width="800">
 </p>
 
 ### Assessment
 <p align="center">
-  <img src="demo_file/assessment.png" width="800">
+  <img src="demo_files/assessment.png" width="800">
 </p>
 
 ### Result
 <p align="center">
-  <img src="demo_file/result.png" width="800">
+  <img src="demo_files/result.png" width="800">
 </p>
 
-📄 **Assessment Report:** [View PDF](demo_file/NeuroLearn_Report_1772355573144.pdf)
+📄 **Assessment Report:** [View PDF](demo_files/NeuroLearn_Report_1772355573144.pdf)
 
 ```bash
 cd neurolearn
