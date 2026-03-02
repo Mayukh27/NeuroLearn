@@ -242,7 +242,7 @@ Use the "Play Custom URL" button on the video page to paste any URL.
 
 **Backend:** FastAPI, Pydantic, TinyDB, Loguru
 
-**ML Models:** MediaPipe (attention), OpenAI Whisper (transcription), FLAN-T5 (questions), Custom adaptive engine
+**ML Models:** MediaPipe (attention), Faster Whisper (transcription), FLAN-T5 (questions), Custom adaptive engine
 
 ---
 
