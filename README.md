@@ -1,10 +1,32 @@
-# NeuraLearn — Adaptive Learning Platform
+# NeuroLearn — Adaptive Learning Platform
 
 AI-powered e-learning platform with real-time attention monitoring, live video transcription, adaptive assessments, and gamification.
 
 ---
 
-## Quick Start (Frontend Only — No Backend Required)
+## Demo Screens
+
+### Dashboard
+<p align="center">
+  <img src="demo_file/dashboard.png" width="800">
+</p>
+
+### Video Learning
+<p align="center">
+  <img src="demo_file/video_learning.png" width="800">
+</p>
+
+### Assessment
+<p align="center">
+  <img src="demo_file/assessment.png" width="800">
+</p>
+
+### Result
+<p align="center">
+  <img src="demo_file/result.png" width="800">
+</p>
+
+📄 **Assessment Report:** [View PDF](demo_file/NeuroLearn_Report_1772355573144.pdf)
 
 ```bash
 cd neurolearn
