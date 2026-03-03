@@ -279,3 +279,4 @@ Use the "Play Custom URL" button on the video page to paste any URL.
 | `/results` | Results | Score gauge, XP earned, adaptive feedback |
 | `/leaderboard` | Leaderboard | Global rankings with podium |
 | `/profile` | Profile | Student info, achievements, stats |
+
