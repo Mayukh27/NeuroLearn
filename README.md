@@ -13,7 +13,7 @@ AI-powered e-learning platform with real-time attention monitoring, live video t
 
 ### Video Learning
 <p align="center">
-  <img src="demo_files/video_learning.png" width="800">
+  <img src="demo_files/video_learning.jpeg" width="800">
 </p>
 
 ### Assessment
