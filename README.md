@@ -1,6 +1,6 @@
 # NeuroLearn — Adaptive Learning Platform
 
-AI-powered e-learning platform with real-time attention monitoring, live video transcription, adaptive assessments, and gamification.
+AI-powered e-learning platform with real-time attention monitoring, live video transcription, adaptive assessments, and gamification..
 
 ---
 
