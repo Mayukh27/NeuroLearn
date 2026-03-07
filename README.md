@@ -200,6 +200,10 @@ Student clicks "Take Assessment"
 ```
 
 ---
+### Flowchart
+<p align="center">
+  <img src="/flow_diagram.png" width="800">
+</p>
 
 ## API Endpoints Reference
 
