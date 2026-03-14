@@ -11,7 +11,7 @@ python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 
 # --- ML / AI ---
-torch==2.4.1
+torch
 torchvision==0.19.1
 transformers==4.44.2
 accelerate==0.34.2
