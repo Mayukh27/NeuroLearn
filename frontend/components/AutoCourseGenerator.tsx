@@ -1,0 +1,380 @@
+"use client"
+
+import { useState } from "react"
+import { motion, AnimatePresence } from "framer-motion"
+import {
+  Search,
+  Loader2,
+  BookOpen,
+  PlayCircle,
+  CheckCircle2,
+  AlertCircle,
+  Zap,
+  Clock,
+  ExternalLink,
+  Sparkles,
+} from "lucide-react"
+
+// ── Types ────────────────────────────────────────────────────
+
+interface DiscoveredVideo {
+  id: string
+  title: string
+  url: string
+  duration: number
+  thumbnail: string
+  channel: string
+  assessmentAvailable: boolean
+  transcriptionAvailable: boolean
+}
+
+interface DiscoverResponse {
+  courseId: string
+  courseTitle: string
+  topic: string
+  description: string
+  videos: DiscoveredVideo[]
+  totalFound: number
+  status: "success" | "partial" | "failed"
+  elapsedSeconds: number
+}
+
+// ── Helpers ──────────────────────────────────────────────────
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api"
+
+function snakeToCamel(str: string): string {
+  return str.replace(/_([a-z])/g, (_, c) => c.toUpperCase())
+}
+function normalizeKeys(obj: unknown): unknown {
+  if (Array.isArray(obj)) return obj.map(normalizeKeys)
+  if (obj !== null && typeof obj === "object") {
+    return Object.keys(obj as object).reduce((acc: Record<string, unknown>, key) => {
+      acc[snakeToCamel(key)] = normalizeKeys((obj as Record<string, unknown>)[key])
+      return acc
+    }, {})
+  }
+  return obj
+}
+
+function formatDuration(seconds: number): string {
+  if (!seconds) return "Unknown"
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = seconds % 60
+  if (h > 0) return `${h}h ${m}m`
+  if (m > 0) return `${m}m ${s}s`
+  return `${s}s`
+}
+
+// ── Sub-components ────────────────────────────────────────────
+
+function VideoCard({ video, index }: { video: DiscoveredVideo; index: number }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, x: -20 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={{ delay: index * 0.07, duration: 0.4, ease: [0.4, 0, 0.2, 1] }}
+      className="flex gap-4 p-4 rounded-xl bg-[var(--bg-card)] border border-[var(--border-subtle)]
+                 hover:border-violet-500/30 transition-all duration-200 group"
+    >
+      {/* Thumbnail */}
+      <div className="flex-shrink-0 w-28 h-[4.2rem] rounded-lg overflow-hidden bg-white/5 relative">
+        {video.thumbnail ? (
+          <img
+            src={video.thumbnail}
+            alt={video.title}
+            className="w-full h-full object-cover"
+            onError={(e) => {
+              ;(e.target as HTMLImageElement).style.display = "none"
+            }}
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center">
+            <PlayCircle className="w-8 h-8 text-violet-400/40" />
+          </div>
+        )}
+        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-all duration-200
+                        flex items-center justify-center">
+          <PlayCircle className="w-7 h-7 text-white opacity-0 group-hover:opacity-100 transition-opacity duration-200" />
+        </div>
+      </div>
+
+      {/* Info */}
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-medium text-[var(--text-primary)] line-clamp-2 leading-snug">
+          {video.title}
+        </p>
+        {video.channel && (
+          <p className="text-xs text-[var(--text-muted)] mt-1">{video.channel}</p>
+        )}
+        <div className="flex items-center gap-3 mt-2 flex-wrap">
+          <span className="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+            <Clock className="w-3 h-3" />
+            {formatDuration(video.duration)}
+          </span>
+          {video.assessmentAvailable && (
+            <span className="flex items-center gap-1 text-xs text-emerald-400 bg-emerald-500/10
+                             px-2 py-0.5 rounded-full">
+              <CheckCircle2 className="w-3 h-3" />
+              Assessment ready
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Actions */}
+      <div className="flex-shrink-0 flex flex-col gap-2 justify-center">
+        <a
+          href={video.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center gap-1 text-xs text-violet-400 hover:text-violet-300
+                     bg-violet-500/10 hover:bg-violet-500/20 px-3 py-1.5 rounded-lg
+                     transition-all duration-150"
+        >
+          Watch <ExternalLink className="w-3 h-3" />
+        </a>
+      </div>
+    </motion.div>
+  )
+}
+
+// ── Main Component ────────────────────────────────────────────
+
+export default function AutoCourseGenerator() {
+  const [topic, setTopic] = useState("")
+  const [maxVideos, setMaxVideos] = useState(5)
+  const [loading, setLoading] = useState(false)
+  const [result, setResult] = useState<DiscoverResponse | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [runFull, setRunFull] = useState(false)
+
+  const EXAMPLE_TOPICS = [
+    "Operating Systems",
+    "Machine Learning",
+    "React Hooks",
+    "Networking Basics",
+    "Data Structures",
+  ]
+
+  async function handleDiscover() {
+    if (!topic.trim()) return
+    setLoading(true)
+    setError(null)
+    setResult(null)
+
+    const endpoint = runFull
+      ? `${API_BASE}/content/pipeline/full`
+      : `${API_BASE}/content/discover`
+
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          topic: topic.trim(),
+          max_videos: maxVideos,
+          auto_transcribe: false,
+        }),
+      })
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `HTTP ${res.status}`)
+      }
+
+      const raw = await res.json()
+      const normalized = normalizeKeys(raw) as DiscoverResponse
+      setResult(normalized)
+    } catch (ex: unknown) {
+      setError(ex instanceof Error ? ex.message : "Unknown error occurred")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Enter") handleDiscover()
+  }
+
+  return (
+    <div className="w-full max-w-2xl mx-auto space-y-6">
+      {/* Header */}
+      <div className="text-center space-y-1">
+        <div className="flex items-center justify-center gap-2 mb-2">
+          <Sparkles className="w-5 h-5 text-violet-400" />
+          <h2 className="text-lg font-semibold text-[var(--text-primary)]">
+            Auto Course Generator
+          </h2>
+        </div>
+        <p className="text-sm text-[var(--text-muted)]">
+          Enter any topic — NeuroLearn finds educational videos and creates
+          adaptive assessments automatically.
+        </p>
+      </div>
+
+      {/* Input */}
+      <div className="space-y-3">
+        <div className="flex gap-2">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-muted)]" />
+            <input
+              type="text"
+              value={topic}
+              onChange={(e) => setTopic(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="e.g. Operating Systems, React Hooks, Machine Learning…"
+              className="w-full pl-10 pr-4 py-3 rounded-xl text-sm
+                         bg-[var(--bg-card)] border border-[var(--border-subtle)]
+                         text-[var(--text-primary)] placeholder:text-[var(--text-muted)]
+                         focus:outline-none focus:border-violet-500/50 focus:ring-1 focus:ring-violet-500/20
+                         transition-all duration-150"
+            />
+          </div>
+
+          {/* Max videos selector */}
+          <select
+            value={maxVideos}
+            onChange={(e) => setMaxVideos(Number(e.target.value))}
+            className="px-3 py-3 rounded-xl text-sm bg-[var(--bg-card)] border border-[var(--border-subtle)]
+                       text-[var(--text-primary)] focus:outline-none focus:border-violet-500/50
+                       cursor-pointer"
+          >
+            {[3, 4, 5].map((n) => (
+              <option key={n} value={n}>
+                {n} videos
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Full pipeline toggle */}
+        <label className="flex items-center gap-2 cursor-pointer w-fit">
+          <div
+            onClick={() => setRunFull((v) => !v)}
+            className={`w-9 h-5 rounded-full transition-colors duration-200 relative
+                        ${runFull ? "bg-violet-500" : "bg-white/10"}`}
+          >
+            <div
+              className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200
+                          ${runFull ? "translate-x-4" : "translate-x-0.5"}`}
+            />
+          </div>
+          <span className="text-xs text-[var(--text-muted)]">
+            Full pipeline (transcribe + generate assessments in background)
+          </span>
+        </label>
+
+        {/* Discover button */}
+        <button
+          onClick={handleDiscover}
+          disabled={loading || !topic.trim()}
+          className="w-full flex items-center justify-center gap-2 py-3 px-4
+                     rounded-xl font-medium text-sm transition-all duration-200
+                     bg-violet-600 hover:bg-violet-500 disabled:opacity-50
+                     disabled:cursor-not-allowed text-white shadow-lg shadow-violet-500/20"
+        >
+          {loading ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin" />
+              Discovering content…
+            </>
+          ) : (
+            <>
+              <Zap className="w-4 h-4" />
+              Generate Course
+            </>
+          )}
+        </button>
+      </div>
+
+      {/* Example topics */}
+      {!result && !loading && (
+        <div className="flex flex-wrap gap-2 justify-center">
+          {EXAMPLE_TOPICS.map((t) => (
+            <button
+              key={t}
+              onClick={() => setTopic(t)}
+              className="text-xs px-3 py-1.5 rounded-full bg-white/5 hover:bg-violet-500/15
+                         border border-[var(--border-subtle)] hover:border-violet-500/30
+                         text-[var(--text-muted)] hover:text-violet-300 transition-all duration-150"
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Error */}
+      <AnimatePresence>
+        {error && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="flex items-start gap-3 p-4 rounded-xl bg-red-500/10 border border-red-500/20"
+          >
+            <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-medium text-red-400">Discovery failed</p>
+              <p className="text-xs text-red-300/70 mt-0.5">{error}</p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Results */}
+      <AnimatePresence>
+        {result && (
+          <motion.div
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="space-y-4"
+          >
+            {/* Course header */}
+            <div className="flex items-center justify-between p-4 rounded-xl
+                            bg-violet-500/10 border border-violet-500/20">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-violet-500/20 flex items-center justify-center">
+                  <BookOpen className="w-5 h-5 text-violet-400" />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-[var(--text-primary)]">
+                    {result.courseTitle}
+                  </p>
+                  <p className="text-xs text-[var(--text-muted)]">
+                    {result.totalFound} videos found · {result.elapsedSeconds.toFixed(1)}s
+                  </p>
+                </div>
+              </div>
+              <span
+                className={`text-xs px-2.5 py-1 rounded-full font-medium ${
+                  result.status === "success"
+                    ? "bg-emerald-500/15 text-emerald-400"
+                    : "bg-amber-500/15 text-amber-400"
+                }`}
+              >
+                {result.status}
+              </span>
+            </div>
+
+            {/* Video list */}
+            <div className="space-y-2">
+              {result.videos.map((video, i) => (
+                <VideoCard key={video.id} video={video} index={i} />
+              ))}
+            </div>
+
+            {/* CTA */}
+            <p className="text-center text-xs text-[var(--text-muted)] pt-1">
+              Course ID: <code className="text-violet-400">{result.courseId}</code>
+              {" · "}Use this to track progress in NeuroLearn.
+            </p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}

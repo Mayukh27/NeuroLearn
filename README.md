@@ -248,6 +248,62 @@ DB_PATH=./data/neurolearn_db.json
 
 ---
 
+## Deployment (Vercel + Render)
+
+### 1. Deploy Backend to Render
+
+1. Create a new **Web Service** on Render from this repository.
+2. Set **Root Directory** to `backend`.
+3. Use these commands:
+   - Build Command: `pip install -r requirements-render.txt`
+   - Start Command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+4. Add environment variables in Render:
+
+| Variable | Value |
+|----------|-------|
+| HOST | 0.0.0.0 |
+| PORT | 10000 |
+| DEBUG | false |
+| CORS_ORIGINS | https://YOUR_VERCEL_DOMAIN.vercel.app,http://localhost:3000 |
+| WHISPER_MODEL_SIZE | base |
+| FLAN_T5_MODEL | google/flan-t5-base |
+| DB_PATH | ./data/neurolearn_db.json |
+
+5. Deploy and copy your backend URL, for example:
+   - `https://neurolearn-backend.onrender.com`
+
+### 2. Deploy Frontend to Vercel
+
+1. Import this repository in Vercel.
+2. Set **Root Directory** to `frontend`.
+3. Add environment variable:
+
+| Variable | Value |
+|----------|-------|
+| NEXT_PUBLIC_API_URL | https://YOUR_RENDER_BACKEND.onrender.com/api |
+
+4. Deploy.
+
+### 3. Final CORS Update
+
+After Vercel gives you the final URL, update Render `CORS_ORIGINS` to include it exactly.
+
+Example:
+
+```
+https://neurolearn-frontend.vercel.app,http://localhost:3000
+```
+
+Then redeploy Render once.
+
+### Notes
+
+- Render should use `requirements-render.txt` for reliable builds on free/starter tiers.
+- Full ML dependencies are still available in `backend/requirements.txt` for local/full environments.
+- Health endpoint for Render checks: `/health`
+
+---
+
 ## Video URL Support
 
 The VideoPlayer auto-detects and handles:

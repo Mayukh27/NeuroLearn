@@ -28,6 +28,7 @@ from routers import (
     assessment_router,
     gamification_router,
     report_router,
+    content_router,          # ← NEW: Auto Course Generator
 )
 
 # Import database seeding
@@ -80,9 +81,10 @@ app = FastAPI(
         "- Real-time attention monitoring from webcam\n"
         "- Live video transcription\n"
         "- Adaptive assessments that adjust to student performance\n"
-        "- Leaderboard, daily challenges, notifications"
+        "- Leaderboard, daily challenges, notifications\n"
+        "- **Auto Course Generator** (web scraping, no paid API)\n"
     ),
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -106,6 +108,7 @@ app.include_router(transcription_router)
 app.include_router(assessment_router)
 app.include_router(gamification_router)
 app.include_router(report_router)
+app.include_router(content_router)     # ← NEW
 
 
 # ── Health Check ──
@@ -114,7 +117,7 @@ async def root():
     """API root — basic info."""
     return {
         "name": "NeuroLearn API",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "status": "running",
         "docs": "/docs",
     }
@@ -124,32 +127,19 @@ async def root():
 async def health_check():
     """
     Detailed health check with ML model status.
-
-    JSON Response:
-    {
-        "status": "healthy",
-        "version": "1.0.0",
-        "models_loaded": {
-            "attention_detector": true/false,
-            "transcription_whisper": true/false,
-            "question_generator_flan_t5": true/false,
-            "adaptive_engine": true
-        }
-    }
     """
     return {
         "status": "healthy",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "models_loaded": {
             "attention_detector": attention_detector.face_mesh is not None,
             "transcription_whisper": transcription_service.model is not None,
             "question_generator_flan_t5": question_generator.model is not None,
-            "adaptive_engine": True,  # Always available (no ML model needed)
+            "adaptive_engine": True,
         },
     }
 
 
-# ── API Overview ──
 @app.get("/api", tags=["Health"])
 async def api_overview():
     """List all available API endpoint groups."""
@@ -184,6 +174,12 @@ async def api_overview():
                 "GET /api/leaderboard": "Global leaderboard",
                 "GET /api/challenges/daily": "Daily challenges",
                 "GET /api/notifications": "Student notifications",
+            },
+            "content_discovery": {                                       # ← NEW
+                "POST /api/content/discover": "Discover videos for a topic (scraping)",
+                "GET /api/content/courses/auto": "List auto-generated courses",
+                "GET /api/content/courses/auto/{course_id}": "Get auto course details",
+                "POST /api/content/pipeline/full": "Full pipeline: discover + transcribe + assess",
             },
         }
     }

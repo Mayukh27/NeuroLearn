@@ -22,6 +22,7 @@ challenges_table = db.table("daily_challenges")
 notifications_table = db.table("notifications")
 attention_logs_table = db.table("attention_logs")
 transcripts_table = db.table("transcripts")
+auto_courses_table = db.table("auto_courses")
 
 def seed_database():
     """Populate database with initial dummy data if empty."""
@@ -215,3 +216,62 @@ def get_daily_challenges() -> list[dict]:
 
 def get_notifications(student_id: str = "student_001") -> list[dict]:
     return notifications_table.all()
+
+
+# ── Auto Courses (add to database.py) ────────────────────────
+
+from tinydb import Query as _Query
+
+def save_auto_course(course_data: dict) -> None:
+    """
+    Persist an auto-generated course (from the scraping pipeline) to DB.
+    Upserts by course_id to avoid duplicates on re-discover.
+    """
+    from data.database import auto_courses_table  # import the new table
+    Q = _Query()
+    course_id = course_data.get("course_id")
+    existing = auto_courses_table.search(Q.course_id == course_id)
+    if existing:
+        auto_courses_table.update(course_data, Q.course_id == course_id)
+    else:
+        auto_courses_table.insert(course_data)
+
+
+def get_auto_course(course_id: str) -> dict | None:
+    """Retrieve a single auto-generated course by ID."""
+    from data.database import auto_courses_table
+    Q = _Query()
+    results = auto_courses_table.search(Q.course_id == course_id)
+    return results[0] if results else None
+
+
+def get_all_auto_courses() -> list[dict]:
+    """Return all auto-generated courses, newest first."""
+    from data.database import auto_courses_table
+    courses = auto_courses_table.all()
+    return sorted(courses, key=lambda c: c.get("generated_at", 0), reverse=True)
+
+
+def update_video_transcription_status(
+    course_id: str,
+    video_id: str,
+    available: bool,
+) -> None:
+    """
+    Mark a video inside an auto course as transcribed.
+    Mutates the `videos` list inside the stored course document.
+    """
+    from data.database import auto_courses_table
+    Q = _Query()
+    course = get_auto_course(course_id)
+    if not course:
+        return
+    updated_videos = []
+    for v in course.get("videos", []):
+        if v.get("id") == video_id:
+            v["transcription_available"] = available
+        updated_videos.append(v)
+    auto_courses_table.update(
+        {"videos": updated_videos},
+        Q.course_id == course_id,
+    )

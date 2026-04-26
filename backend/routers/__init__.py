@@ -5,6 +5,7 @@ from .transcription import router as transcription_router
 from .assessment import router as assessment_router
 from .gamification import router as gamification_router
 from .report import router as report_router
+from .content import router as content_router          # ← NEW
 
 __all__ = [
     "student_router",
@@ -14,4 +15,5 @@ __all__ = [
     "assessment_router",
     "gamification_router",
     "report_router",
+    "content_router",                                  # ← NEW
 ]
