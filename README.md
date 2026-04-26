@@ -256,18 +256,17 @@ DB_PATH=./data/neurolearn_db.json
 2. Set **Root Directory** to `backend`.
 3. Use these commands:
    - Build Command: `pip install -r requirements-render.txt`
-   - Start Command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+   - Start Command: `python -m uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1`
 4. Add environment variables in Render:
 
 | Variable | Value |
 |----------|-------|
-| HOST | 0.0.0.0 |
-| PORT | 10000 |
 | DEBUG | false |
 | CORS_ORIGINS | https://YOUR_VERCEL_DOMAIN.vercel.app,http://localhost:3000 |
 | WHISPER_MODEL_SIZE | base |
 | FLAN_T5_MODEL | google/flan-t5-base |
 | DB_PATH | ./data/neurolearn_db.json |
+| PYTHONUNBUFFERED | 1 |
 
 5. Deploy and copy your backend URL, for example:
    - `https://neurolearn-backend.onrender.com`
