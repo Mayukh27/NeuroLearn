@@ -274,15 +274,14 @@ DB_PATH=./data/neurolearn_db.json
 
 ### 2. Deploy Frontend to Vercel
 
-1. Import this repository in Vercel.
-2. Set **Root Directory** to `frontend`.
-3. Add environment variable:
-
-| Variable | Value |
-|----------|-------|
-| NEXT_PUBLIC_API_URL | https://YOUR_RENDER_BACKEND.onrender.com/api |
-
+1. Import this repository to Vercel (https://vercel.com/new).
+2. **In Vercel Project Settings → General**, set **Root Directory** to `frontend`.
+   - This is critical for the monorepo setup.
+3. In **Environment Variables**, add:
+   - `NEXT_PUBLIC_API_URL`: `https://YOUR_RENDER_BACKEND.onrender.com/api`
 4. Deploy.
+
+Vercel will automatically detect Next.js, install from `frontend/package.json`, and build.
 
 ### 3. Final CORS Update
 
