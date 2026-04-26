@@ -4,6 +4,19 @@ AI-powered e-learning platform with real-time attention monitoring, live video t
 
 ---
 
+### Key Features
+
+* Automated course generation from topic input
+* Web scraping-based video discovery (no paid APIs)
+* End-to-end pipeline: video → transcription → assessment
+* AI transcription using Whisper
+* NLP-based question generation (FLAN-T5)
+* Adaptive assessment based on performance
+* Real-time attention tracking (MediaPipe)
+* FastAPI backend with modular architecture
+* Multi-source video support (YouTube, MP4, URLs)
+* Deployment-ready full-stack system
+
 ## Demo Screens
 
 ### Dashboard
