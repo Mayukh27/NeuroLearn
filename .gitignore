@@ -5,6 +5,8 @@ node_modules/
 __pycache__/
 *.py[cod]
 venv/
+
+# Environment variables
 .env
 
 # Build outputs
