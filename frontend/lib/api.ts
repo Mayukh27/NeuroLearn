@@ -34,9 +34,90 @@ import {
 // ── Config ──
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api"
 const STRICT_MODE = process.env.NEXT_PUBLIC_API_STRICT === "true"
+const SAVED_AUTO_COURSES_KEY = "neurolearn_saved_auto_courses"
+
+export interface DiscoveredVideo {
+  id: string
+  title: string
+  url: string
+  duration: number
+  thumbnail: string
+  channel: string
+  assessmentAvailable: boolean
+  transcriptionAvailable: boolean
+}
+
+export interface AutoCourse {
+  courseId: string
+  courseTitle: string
+  topic: string
+  description: string
+  icon: string
+  category: string
+  difficulty: string
+  tags: string[]
+  videos: DiscoveredVideo[]
+  totalFound: number
+  generatedAt: number
+  elapsedSeconds: number
+  status: "success" | "partial" | "failed"
+}
+
+export interface DiscoverRequest {
+  topic: string
+  maxVideos?: number
+  autoTranscribe?: boolean
+}
+
+export interface FullPipelineRequest {
+  topic: string
+  maxVideos?: number
+  studentId?: string
+  attentionScore?: number
+}
+
+export interface FullPipelineResponse {
+  courseId: string
+  courseTitle: string
+  status: string
+  message: string
+  videosQueued: number
+  assessmentSessions: object[]
+}
+
+export interface SaveAutoCourseResponse {
+  saved: boolean
+  courseId: string
+  title: string
+  message: string
+}
 
 // ── Helpers ──
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+function getLocallySavedCourses(): Course[] {
+  if (typeof window === "undefined") return []
+  try {
+    const raw = window.localStorage.getItem(SAVED_AUTO_COURSES_KEY)
+    const parsed = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function mergeWithLocalSavedCourses(courses: Course[]): Course[] {
+  const localSaved = getLocallySavedCourses()
+  if (!localSaved.length) return courses
+
+  const merged = [...courses]
+  for (const localCourse of localSaved) {
+    if (!merged.some((course) => course.id === localCourse.id)) {
+      merged.push(localCourse)
+    }
+  }
+  return merged
+}
 
 /**
  * Recursively convert snake_case keys to camelCase.
@@ -72,11 +153,60 @@ async function apiFetch<T>(
     // Normalize snake_case keys from backend to camelCase for frontend
     return normalizeKeys(data) as T
   } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err)
+    const isNetworkIssue = /Failed to fetch|NetworkError|Load failed/i.test(errMsg)
+
+    if (isNetworkIssue && !fallback) {
+      throw new Error(
+        `Cannot reach backend at ${API_BASE}. Check NEXT_PUBLIC_API_URL and backend CORS settings.`
+      )
+    }
+
     if (STRICT_MODE) throw err
     console.warn(`[API] ${path} failed, using fallback:`, (err as Error).message)
     if (fallback) return await fallback()
     throw err
   }
+}
+
+/** POST /api/content/discover */
+export async function discoverCourseContent(
+  request: DiscoverRequest
+): Promise<AutoCourse> {
+  return apiFetch<AutoCourse>("/content/discover", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      topic: request.topic,
+      max_videos: request.maxVideos ?? 5,
+      auto_transcribe: request.autoTranscribe ?? false,
+    }),
+  })
+}
+
+/** POST /api/content/pipeline/full */
+export async function runFullCoursePipeline(
+  request: FullPipelineRequest
+): Promise<FullPipelineResponse> {
+  return apiFetch<FullPipelineResponse>("/content/pipeline/full", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      topic: request.topic,
+      max_videos: request.maxVideos ?? 3,
+      student_id: request.studentId ?? "student_001",
+      attention_score: request.attentionScore ?? 75,
+    }),
+  })
+}
+
+/** POST /api/content/courses/auto/:id/save */
+export async function saveAutoCourseToDashboard(
+  courseId: string
+): Promise<SaveAutoCourseResponse> {
+  return apiFetch<SaveAutoCourseResponse>(`/content/courses/auto/${courseId}/save`, {
+    method: "POST",
+  })
 }
 
 // ============================================================
@@ -123,7 +253,7 @@ export async function awardXP(
 
 /** GET /api/courses */
 export async function fetchCourses(): Promise<Course[]> {
-  return apiFetch<Course[]>(
+  const courses = await apiFetch<Course[]>(
     "/courses",
     { method: "GET" },
     async () => {
@@ -131,6 +261,8 @@ export async function fetchCourses(): Promise<Course[]> {
       return JSON.parse(JSON.stringify(DUMMY_COURSES))
     }
   )
+
+  return mergeWithLocalSavedCourses(courses)
 }
 
 /** GET /api/courses/:id */
@@ -140,6 +272,8 @@ export async function fetchCourseById(courseId: string): Promise<Course | null> 
     { method: "GET" },
     async () => {
       await delay(200)
+      const localCourse = getLocallySavedCourses().find((c) => c.id === courseId)
+      if (localCourse) return JSON.parse(JSON.stringify(localCourse))
       const c = DUMMY_COURSES.find((c) => c.id === courseId)
       return c ? JSON.parse(JSON.stringify(c)) : null
     }
@@ -156,7 +290,8 @@ export async function fetchVideoById(
     { method: "GET" },
     async () => {
       await delay(150)
-      const course = DUMMY_COURSES.find((c) => c.id === courseId)
+      const localCourse = getLocallySavedCourses().find((c) => c.id === courseId)
+      const course = localCourse || DUMMY_COURSES.find((c) => c.id === courseId)
       if (!course) return null
       const video = course.videoLinks.find((v) => v.id === videoId)
       if (!video) return null

@@ -29,6 +29,7 @@ from data.database import (
     get_auto_course,
     get_all_auto_courses,
     update_video_transcription_status,
+    save_auto_course_to_courses,
 )
 from ml import transcription_service, question_generator, adaptive_engine
 
@@ -259,6 +260,28 @@ async def get_auto_course_detail(course_id: str):
     if not course:
         raise HTTPException(status_code=404, detail=f"Auto course '{course_id}' not found")
     return course
+
+
+@router.post("/courses/auto/{course_id}/save")
+async def save_auto_course_to_dashboard(course_id: str):
+    """
+    Save an auto-generated course into the main courses collection
+    so it appears in dashboard "All Courses".
+    """
+    auto_course = get_auto_course(course_id)
+    if not auto_course:
+        raise HTTPException(status_code=404, detail=f"Auto course '{course_id}' not found")
+
+    saved_course = save_auto_course_to_courses(course_id)
+    if not saved_course:
+        raise HTTPException(status_code=500, detail="Failed to save auto course")
+
+    return {
+        "saved": True,
+        "course_id": saved_course.get("id"),
+        "title": saved_course.get("title"),
+        "message": "Course saved to dashboard successfully",
+    }
 
 
 @router.post("/pipeline/full", response_model=FullPipelineResponse)

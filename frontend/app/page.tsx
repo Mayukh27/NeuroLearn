@@ -1,55 +1,75 @@
 "use client"
 
-import { useEffect } from "react"
-import { useRouter } from "next/navigation"
 import { motion } from "framer-motion"
+import { Sparkles } from "lucide-react"
+import AutoCourseGenerator from "@/components/AutoCourseGenerator"
 
-export default function Home() {
-  const router = useRouter()
-
-  useEffect(() => {
-    const timer = setTimeout(() => router.push("/dashboard"), 1500)
-    return () => clearTimeout(timer)
-  }, [router])
-
+export default function DiscoverPage() {
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center gap-6 bg-[var(--bg-primary)]">
-      {/* Animated logo */}
-      <motion.div
-        initial={{ scale: 0, rotate: -180 }}
-        animate={{ scale: 1, rotate: 0 }}
-        transition={{ type: "spring", stiffness: 200, damping: 15 }}
-        className="relative"
-      >
-        <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-blue-500 via-violet-500 to-purple-600 flex items-center justify-center shadow-lg shadow-violet-500/30">
-          <span className="text-3xl font-black text-white tracking-tight">NL</span>
-        </div>
-        <motion.div
-          animate={{ rotate: 360 }}
-          transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
-          className="absolute -inset-2 rounded-3xl border-2 border-violet-500/30 border-t-violet-500"
-        />
-      </motion.div>
+    <div className="p-6 max-w-[860px] mx-auto space-y-8">
 
+      {/* Page header */}
       <motion.div
-        initial={{ opacity: 0, y: 20 }}
+        initial={{ opacity: 0, y: -16 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.3 }}
-        className="text-center"
+        transition={{ duration: 0.4 }}
       >
-        <h1 className="text-2xl font-bold gradient-text mb-2">NeuroLearn</h1>
-        <p className="text-sm text-[var(--text-muted)]">
-          Loading your learning experience...
-        </p>
+        <div className="flex items-center gap-3 mb-2">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-violet-500/30 to-purple-600/30 border border-violet-500/20 flex items-center justify-center">
+            <Sparkles size={20} className="text-violet-400" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold text-[var(--text-primary)]">
+              Auto Course Generator
+            </h1>
+            <p className="text-sm text-[var(--text-muted)]">
+              Type any topic — NeuroLearn finds videos and builds adaptive assessments automatically
+            </p>
+          </div>
+        </div>
       </motion.div>
 
-      {/* Loading bar */}
+      {/* How it works */}
       <motion.div
-        initial={{ width: 0 }}
-        animate={{ width: 200 }}
-        transition={{ duration: 1.2, ease: "easeInOut" }}
-        className="h-1 rounded-full progress-animated"
-      />
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.1, duration: 0.4 }}
+        className="grid grid-cols-3 gap-3"
+      >
+        {[
+          { step: "1", title: "Enter a topic", desc: "e.g. Operating Systems, React Hooks, Machine Learning", icon: "🔍" },
+          { step: "2", title: "We find videos",  desc: "Scrapes YouTube for top educational content — no paid API", icon: "🎬" },
+          { step: "3", title: "Assessments ready", desc: "FLAN-T5 generates adaptive quiz questions from transcripts", icon: "🧠" },
+        ].map((item, i) => (
+          <motion.div
+            key={item.step}
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.15 + i * 0.07 }}
+            className="rounded-xl p-4 bg-[var(--bg-card)] border border-[var(--border-subtle)] space-y-2"
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-xl">{item.icon}</span>
+              <span className="text-xs font-bold text-violet-400 bg-violet-500/10 px-2 py-0.5 rounded-full">
+                Step {item.step}
+              </span>
+            </div>
+            <p className="text-sm font-semibold text-[var(--text-primary)]">{item.title}</p>
+            <p className="text-xs text-[var(--text-muted)] leading-relaxed">{item.desc}</p>
+          </motion.div>
+        ))}
+      </motion.div>
+
+      {/* Generator */}
+      <motion.div
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.25, duration: 0.4 }}
+        className="rounded-2xl bg-[var(--bg-card)] border border-[var(--border-subtle)] p-6"
+      >
+        <AutoCourseGenerator />
+      </motion.div>
+
     </div>
   )
 }

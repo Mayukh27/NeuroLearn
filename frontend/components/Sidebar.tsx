@@ -17,6 +17,7 @@ import {
   ChevronRight,
   Flame,
   Star,
+  Sparkles,      // ← NEW
 } from "lucide-react"
 
 interface SidebarProps {
@@ -27,12 +28,13 @@ interface SidebarProps {
 }
 
 const menuItems = [
-  { label: "Dashboard", icon: LayoutDashboard, href: "/dashboard" },
-  { label: "Video Learning", icon: PlayCircle, href: "/video" },
-  { label: "Assessment", icon: ClipboardCheck, href: "/assessment" },
-  { label: "Results", icon: BarChart3, href: "/results" },
-  { label: "Leaderboard", icon: Trophy, href: "/leaderboard" },
-  { label: "Profile", icon: User, href: "/profile" },
+  { label: "Dashboard",     icon: LayoutDashboard, href: "/dashboard" },
+  { label: "Video Learning",icon: PlayCircle,       href: "/video"     },
+  { label: "Assessment",    icon: ClipboardCheck,   href: "/assessment"},
+  { label: "Results",       icon: BarChart3,        href: "/results"   },
+  { label: "Leaderboard",   icon: Trophy,           href: "/leaderboard"},
+  { label: "Profile",       icon: User,             href: "/profile"   },
+  { label: "Auto Course",   icon: Sparkles,         href: "/discover", badge: "NEW" }, // ← NEW
 ]
 
 export default function Sidebar({ xp = 0, xpToNextLevel = 1, level = 1, streak = 0 }: SidebarProps) {
@@ -75,6 +77,8 @@ export default function Sidebar({ xp = 0, xpToNextLevel = 1, level = 1, streak =
           {menuItems.map((item) => {
             const isActive = pathname === item.href || pathname?.startsWith(item.href + "/")
             const Icon = item.icon
+            const isDiscover = item.href === "/discover"
+
             return (
               <Link key={item.href} href={item.href}>
                 <motion.div
@@ -84,7 +88,9 @@ export default function Sidebar({ xp = 0, xpToNextLevel = 1, level = 1, streak =
                     relative flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-all duration-200 group
                     ${isActive
                       ? "bg-gradient-to-r from-violet-500/15 to-purple-500/10 text-[var(--text-primary)]"
-                      : "text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)]"
+                      : isDiscover
+                        ? "text-violet-400 hover:text-violet-300 hover:bg-violet-500/10"
+                        : "text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)]"
                     }
                   `}
                 >
@@ -99,7 +105,13 @@ export default function Sidebar({ xp = 0, xpToNextLevel = 1, level = 1, streak =
 
                   <Icon
                     size={20}
-                    className={`shrink-0 transition-colors ${isActive ? "text-violet-400" : "group-hover:text-violet-400/70"}`}
+                    className={`shrink-0 transition-colors ${
+                      isActive
+                        ? "text-violet-400"
+                        : isDiscover
+                          ? "text-violet-400"
+                          : "group-hover:text-violet-400/70"
+                    }`}
                   />
 
                   <AnimatePresence>
@@ -108,12 +120,25 @@ export default function Sidebar({ xp = 0, xpToNextLevel = 1, level = 1, streak =
                         initial={{ opacity: 0, x: -10 }}
                         animate={{ opacity: 1, x: 0 }}
                         exit={{ opacity: 0, x: -10 }}
-                        className={`text-sm font-medium whitespace-nowrap ${isActive ? "font-semibold" : ""}`}
+                        className={`text-sm font-medium whitespace-nowrap flex-1 ${isActive ? "font-semibold" : ""}`}
                       >
                         {item.label}
                       </motion.span>
                     )}
                   </AnimatePresence>
+
+                  {/* NEW badge */}
+                  {!collapsed && item.badge && !isActive && (
+                    <AnimatePresence>
+                      <motion.span
+                        initial={{ opacity: 0, scale: 0.8 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-violet-500/20 text-violet-400 border border-violet-500/30"
+                      >
+                        {item.badge}
+                      </motion.span>
+                    </AnimatePresence>
+                  )}
                 </motion.div>
               </Link>
             )

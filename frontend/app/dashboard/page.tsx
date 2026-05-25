@@ -13,15 +13,40 @@ import {
 } from "@/lib/api"
 import { Trophy, Target, Flame, Clock, BookOpen, Zap, CheckCircle2, Circle } from "lucide-react"
 
+const SAVED_AUTO_COURSES_KEY = "neurolearn_saved_auto_courses"
+
 export default function DashboardPage() {
   const [courses, setCourses] = useState<Course[]>([])
   const [student, setStudent] = useState<StudentProfile | null>(null)
   const [challenges, setChallenges] = useState<DailyChallenge[]>([])
   const [isLoading, setIsLoading] = useState(true)
 
+  function getLocallySavedCourses(): Course[] {
+    if (typeof window === "undefined") return []
+    try {
+      const raw = window.localStorage.getItem(SAVED_AUTO_COURSES_KEY)
+      const parsed = raw ? JSON.parse(raw) : []
+      return Array.isArray(parsed) ? parsed : []
+    } catch {
+      return []
+    }
+  }
+
   useEffect(() => {
     Promise.all([fetchCourses(), fetchStudentProfile(), fetchDailyChallenges()])
-      .then(([c, s, ch]) => { setCourses(c); setStudent(s); setChallenges(ch) })
+      .then(([c, s, ch]) => {
+        const localSaved = getLocallySavedCourses()
+        const merged = [...c]
+        for (const localCourse of localSaved) {
+          if (!merged.some((course) => course.id === localCourse.id)) {
+            merged.push(localCourse)
+          }
+        }
+
+        setCourses(merged)
+        setStudent(s)
+        setChallenges(ch)
+      })
       .finally(() => setIsLoading(false))
   }, [])
 
@@ -74,7 +99,7 @@ export default function DashboardPage() {
         {/* Courses Grid */}
         <div className="lg:col-span-3">
           <div className="flex items-center justify-between mb-5">
-            <h2 className="text-xl font-bold text-[var(--text-primary)]">Your Courses</h2>
+            <h2 className="text-xl font-bold text-[var(--text-primary)]">All Courses</h2>
             <span className="text-xs text-[var(--text-muted)] bg-[var(--bg-elevated)] px-3 py-1 rounded-full">
               {courses.length} courses
             </span>

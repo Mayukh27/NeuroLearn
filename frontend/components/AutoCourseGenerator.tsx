@@ -14,48 +14,20 @@ import {
   ExternalLink,
   Sparkles,
 } from "lucide-react"
+import {
+  discoverCourseContent,
+  runFullCoursePipeline,
+  saveAutoCourseToDashboard,
+  type AutoCourse,
+  type DiscoveredVideo,
+} from "@/lib/api"
 
 // ── Types ────────────────────────────────────────────────────
 
-interface DiscoveredVideo {
-  id: string
-  title: string
-  url: string
-  duration: number
-  thumbnail: string
-  channel: string
-  assessmentAvailable: boolean
-  transcriptionAvailable: boolean
-}
-
-interface DiscoverResponse {
-  courseId: string
-  courseTitle: string
-  topic: string
-  description: string
-  videos: DiscoveredVideo[]
-  totalFound: number
-  status: "success" | "partial" | "failed"
-  elapsedSeconds: number
-}
+type DiscoverResponse = AutoCourse
+const SAVED_AUTO_COURSES_KEY = "neurolearn_saved_auto_courses"
 
 // ── Helpers ──────────────────────────────────────────────────
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api"
-
-function snakeToCamel(str: string): string {
-  return str.replace(/_([a-z])/g, (_, c) => c.toUpperCase())
-}
-function normalizeKeys(obj: unknown): unknown {
-  if (Array.isArray(obj)) return obj.map(normalizeKeys)
-  if (obj !== null && typeof obj === "object") {
-    return Object.keys(obj as object).reduce((acc: Record<string, unknown>, key) => {
-      acc[snakeToCamel(key)] = normalizeKeys((obj as Record<string, unknown>)[key])
-      return acc
-    }, {})
-  }
-  return obj
-}
 
 function formatDuration(seconds: number): string {
   if (!seconds) return "Unknown"
@@ -65,6 +37,52 @@ function formatDuration(seconds: number): string {
   if (h > 0) return `${h}h ${m}m`
   if (m > 0) return `${m}m ${s}s`
   return `${s}s`
+}
+
+function toDashboardCourse(course: AutoCourse) {
+  const videos = (course.videos || []).map((video, idx) => ({
+    id: video.id,
+    title: video.title,
+    url: video.url,
+    duration: video.duration || 0,
+    thumbnail: video.thumbnail || "",
+    order: idx + 1,
+    completed: false,
+    watchedPercent: 0,
+  }))
+
+  const totalSeconds = videos.reduce((sum, v) => sum + (v.duration || 0), 0)
+
+  return {
+    id: course.courseId,
+    title: course.courseTitle,
+    description: course.description,
+    icon: course.icon || "🎓",
+    category: course.category || "Auto-Generated",
+    difficulty: (course.difficulty || "Intermediate") as "Beginner" | "Intermediate" | "Advanced",
+    totalVideos: videos.length,
+    completedVideos: 0,
+    progress: 0,
+    estimatedHours: Math.max(0.1, Number((totalSeconds / 3600).toFixed(1))),
+    tags: course.tags || ["auto-generated"],
+    videoLinks: videos,
+  }
+}
+
+function saveAutoCourseLocally(course: AutoCourse) {
+  if (typeof window === "undefined") return
+
+  const localCourse = toDashboardCourse(course)
+  const raw = window.localStorage.getItem(SAVED_AUTO_COURSES_KEY)
+  const existing = raw ? JSON.parse(raw) : []
+  const filtered = Array.isArray(existing)
+    ? existing.filter((c: { id?: string }) => c?.id !== localCourse.id)
+    : []
+
+  window.localStorage.setItem(
+    SAVED_AUTO_COURSES_KEY,
+    JSON.stringify([localCourse, ...filtered])
+  )
 }
 
 // ── Sub-components ────────────────────────────────────────────
@@ -148,6 +166,9 @@ export default function AutoCourseGenerator() {
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<DiscoverResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [saveLoading, setSaveLoading] = useState(false)
+  const [savedCourseId, setSavedCourseId] = useState<string | null>(null)
   const [runFull, setRunFull] = useState(false)
 
   const EXAMPLE_TOPICS = [
@@ -162,31 +183,28 @@ export default function AutoCourseGenerator() {
     if (!topic.trim()) return
     setLoading(true)
     setError(null)
+    setNotice(null)
     setResult(null)
-
-    const endpoint = runFull
-      ? `${API_BASE}/content/pipeline/full`
-      : `${API_BASE}/content/discover`
+    setSavedCourseId(null)
 
     try {
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      if (runFull) {
+        const queued = await runFullCoursePipeline({
           topic: topic.trim(),
-          max_videos: maxVideos,
-          auto_transcribe: false,
-        }),
-      })
+          maxVideos,
+          studentId: "student_001",
+          attentionScore: 75,
+        })
 
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.detail || `HTTP ${res.status}`)
+        setNotice(queued.message || "Pipeline queued successfully.")
+      } else {
+        const discovered = await discoverCourseContent({
+          topic: topic.trim(),
+          maxVideos,
+          autoTranscribe: false,
+        })
+        setResult(discovered)
       }
-
-      const raw = await res.json()
-      const normalized = normalizeKeys(raw) as DiscoverResponse
-      setResult(normalized)
     } catch (ex: unknown) {
       setError(ex instanceof Error ? ex.message : "Unknown error occurred")
     } finally {
@@ -196,6 +214,31 @@ export default function AutoCourseGenerator() {
 
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === "Enter") handleDiscover()
+  }
+
+  async function handleSaveCourse() {
+    if (!result?.courseId) return
+    setSaveLoading(true)
+    setError(null)
+
+    try {
+      // Always persist locally so dashboard can show it instantly.
+      saveAutoCourseLocally(result)
+
+      const res = await saveAutoCourseToDashboard(result.courseId)
+      setSavedCourseId(result.courseId)
+      setNotice(res.message || "Course saved to dashboard")
+    } catch (ex: unknown) {
+      const msg = ex instanceof Error ? ex.message : "Could not save course"
+      if (/404/.test(msg)) {
+        setSavedCourseId(result.courseId)
+        setNotice("Saved locally. Restart/redeploy backend to enable server-side save endpoint.")
+      } else {
+        setError(msg)
+      }
+    } finally {
+      setSaveLoading(false)
+    }
   }
 
   return (
@@ -324,6 +367,24 @@ export default function AutoCourseGenerator() {
         )}
       </AnimatePresence>
 
+      {/* Success notice */}
+      <AnimatePresence>
+        {notice && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="flex items-start gap-3 p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20"
+          >
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-medium text-emerald-400">Pipeline queued</p>
+              <p className="text-xs text-emerald-300/80 mt-0.5">{notice}</p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Results */}
       <AnimatePresence>
         {result && (
@@ -368,10 +429,28 @@ export default function AutoCourseGenerator() {
             </div>
 
             {/* CTA */}
-            <p className="text-center text-xs text-[var(--text-muted)] pt-1">
-              Course ID: <code className="text-violet-400">{result.courseId}</code>
-              {" · "}Use this to track progress in NeuroLearn.
-            </p>
+            <div className="pt-1 space-y-3">
+              <p className="text-center text-xs text-[var(--text-muted)]">
+                Course ID: <code className="text-violet-400">{result.courseId}</code>
+                {" · "}Use this to track progress in NeuroLearn.
+              </p>
+
+              <div className="flex justify-center">
+                <button
+                  onClick={handleSaveCourse}
+                  disabled={saveLoading || savedCourseId === result.courseId}
+                  className="flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold
+                             bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 disabled:cursor-not-allowed
+                             text-white transition-all duration-200"
+                >
+                  {saveLoading
+                    ? "Saving..."
+                    : savedCourseId === result.courseId
+                      ? "Saved to Dashboard"
+                      : "Save to Dashboard"}
+                </button>
+              </div>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>

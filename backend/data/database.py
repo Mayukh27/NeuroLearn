@@ -275,3 +275,65 @@ def update_video_transcription_status(
         {"videos": updated_videos},
         Q.course_id == course_id,
     )
+
+
+def save_auto_course_to_courses(course_id: str) -> dict | None:
+    """
+    Convert an auto-generated course into the main courses table format.
+    Upserts by id so the saved course appears in dashboard/video flows.
+    """
+    auto_course = get_auto_course(course_id)
+    if not auto_course:
+        return None
+
+    def _to_title_case_difficulty(value: str) -> str:
+        normalized = (value or "Intermediate").strip().lower()
+        mapping = {
+            "beginner": "Beginner",
+            "intermediate": "Intermediate",
+            "advanced": "Advanced",
+        }
+        return mapping.get(normalized, "Intermediate")
+
+    videos = auto_course.get("videos", [])
+    converted_videos = []
+    for idx, video in enumerate(videos, start=1):
+        converted_videos.append({
+            "id": video.get("id", f"auto_v_{idx}"),
+            "title": video.get("title", f"Video {idx}"),
+            "url": video.get("url", ""),
+            "duration": int(video.get("duration", 0) or 0),
+            "thumbnail": video.get("thumbnail", ""),
+            "order": int(video.get("order", idx)),
+            "completed": bool(video.get("completed", False)),
+            "watched_percent": float(video.get("watched_percent", 0.0) or 0.0),
+        })
+
+    total_videos = len(converted_videos)
+    completed_videos = sum(1 for v in converted_videos if v.get("completed"))
+    total_seconds = sum(int(v.get("duration", 0) or 0) for v in converted_videos)
+    estimated_hours = round(total_seconds / 3600, 1) if total_seconds > 0 else round(max(total_videos, 1) * 0.2, 1)
+    progress = round((completed_videos / total_videos) * 100, 1) if total_videos > 0 else 0.0
+
+    course_doc = {
+        "id": auto_course.get("course_id", course_id),
+        "title": auto_course.get("course_title", "Auto Course"),
+        "description": auto_course.get("description", "Auto-generated course"),
+        "icon": auto_course.get("icon", "🎓"),
+        "category": auto_course.get("category", "Auto-Generated"),
+        "difficulty": _to_title_case_difficulty(auto_course.get("difficulty", "Intermediate")),
+        "total_videos": total_videos,
+        "completed_videos": completed_videos,
+        "progress": progress,
+        "estimated_hours": max(0.1, estimated_hours),
+        "tags": auto_course.get("tags", ["auto-generated"]),
+        "video_links": converted_videos,
+    }
+
+    Q = Query()
+    if courses_table.search(Q.id == course_doc["id"]):
+        courses_table.update(course_doc, Q.id == course_doc["id"])
+    else:
+        courses_table.insert(course_doc)
+
+    return course_doc

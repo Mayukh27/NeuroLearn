@@ -1,4 +1,176 @@
-[00:00:01.816] Server  LOG     ✓ Ready in 1199ms
-[00:00:06.316] Server  LOG     ○ Compiling / ...
-[00:00:11.107] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
-[00:00:15.052] Browser WARN    Detected `scroll-behavior: smooth` on the `<html>` element. To disable smooth scrolling during route transitions, add `data-scroll-behavior="smooth"` to your <html> element. Learn more: https://nextjs.org/docs/messages/missing-data-scroll-behavior
+[00:00:03.216] Server  LOG     ✓ Ready in 2s
+[00:00:06.538] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:00:09.192] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:00:09.193] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:00:09.193] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:00:09.193] Browser WARN    [API] /challenges/daily failed, using fallback: Failed to fetch
+[00:00:09.193] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:36.865] Browser WARN    Detected `scroll-behavior: smooth` on the `<html>` element. To disable smooth scrolling during route transitions, add `data-scroll-behavior="smooth"` to your <html> element. Learn more: https://nextjs.org/docs/messages/missing-data-scroll-behavior
+[00:02:39.273] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:39.273] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:02:39.273] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:39.273] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:39.273] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:02:39.273] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:39.612] Browser LOG     [CameraFeed] Stopping camera
+[00:02:46.817] Browser LOG     [CameraFeed] Stopping camera
+[00:02:49.177] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:49.177] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:02:49.177] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:49.177] Browser WARN    [API] /challenges/daily failed, using fallback: Failed to fetch
+[00:02:49.177] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:49.177] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:51.523] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:02:51.523] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:51.523] Browser WARN    [API] /challenges/daily failed, using fallback: Failed to fetch
+[00:02:51.523] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:51.523] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:51.523] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:02:53.853] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:53.853] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:53.853] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:02:53.853] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:53.853] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:53.853] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:02:56.499] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:56.500] Browser WARN    [API] /challenges/daily failed, using fallback: Failed to fetch
+[00:02:56.500] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:56.500] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:56.500] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:02:56.500] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:02:59.497] Browser WARN    [API] /challenges/daily failed, using fallback: Failed to fetch
+[00:02:59.498] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:03:16.588] Server  LOG     ✓ Compiled in 890ms
+[00:03:21.408] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:03:24.508] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:03:24.508] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:03:24.508] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:03:24.508] Browser WARN    [API] /challenges/daily failed, using fallback: Failed to fetch
+[00:03:24.508] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:03:31.401] Server  LOG     ✓ Compiled in 509ms
+[00:03:43.999] Server  LOG     ✓ Compiled in 950ms
+[00:03:47.172] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:03:50.227] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:03:50.227] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:03:50.228] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:03:50.228] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:03:50.228] Browser WARN    [API] /challenges/daily failed, using fallback: Failed to fetch
+[00:03:50.228] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:03:52.007] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:03:52.711] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:03:55.226] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:03:55.226] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:03:55.226] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:03:55.226] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:03:55.226] Browser WARN    [API] /challenges/daily failed, using fallback: Failed to fetch
+[00:03:55.226] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:03:57.596] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:04:22.147] Server  LOG     ✓ Compiled in 254ms
+[00:04:23.867] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:04:26.353] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:04:26.353] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:04:26.353] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:04:26.353] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:04:26.353] Browser WARN    [API] /challenges/daily failed, using fallback: Failed to fetch
+[00:04:26.353] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:04:27.813] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:04:28.965] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:04:30.388] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:04:30.388] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:04:30.388] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:04:30.388] Browser WARN    [API] /challenges/daily failed, using fallback: Failed to fetch
+[00:04:31.084] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:04:31.374] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:04:47.179] Server  LOG     ✓ Compiled in 335ms
+[00:04:48.800] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:04:50.807] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:04:54.047] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:04:54.048] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:04:54.048] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:04:54.048] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:04:54.048] Browser WARN    [API] /challenges/daily failed, using fallback: Failed to fetch
+[00:04:56.359] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:04:56.359] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:05:59.642] Server  LOG     ✓ Compiled in 278ms
+[00:06:01.610] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:06:04.503] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:06:04.503] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:06:04.503] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:06:04.503] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:06:04.503] Browser WARN    [API] /challenges/daily failed, using fallback: Failed to fetch
+[00:06:04.503] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:06:06.493] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:06:51.192] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:06:53.751] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:06:53.752] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:06:53.752] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:06:53.752] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:06:53.752] Browser WARN    [API] /challenges/daily failed, using fallback: Failed to fetch
+[00:06:53.752] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:06:56.095] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:07:20.942] Server  LOG     ✓ Compiled in 385ms
+[00:07:22.819] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:07:26.508] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:07:26.508] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:07:26.508] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:07:26.508] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:07:26.508] Browser WARN    [API] /challenges/daily failed, using fallback: Failed to fetch
+[00:07:26.508] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:07:28.498] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:07:50.100] Server  LOG     ✓ Compiled in 11.1s
+[00:07:59.394] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:08:02.344] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:08:02.344] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:08:02.344] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:08:02.344] Browser WARN    [API] /challenges/daily failed, using fallback: Failed to fetch
+[00:08:02.344] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:08:14.516] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:08:26.525] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:08:29.077] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:08:29.077] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:08:29.077] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:08:29.077] Browser WARN    [API] /challenges/daily failed, using fallback: Failed to fetch
+[00:08:29.077] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:09:52.027] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:09:54.561] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:09:54.561] Browser WARN    [API] /courses failed, using fallback: Failed to fetch
+[00:09:54.561] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:09:54.561] Browser WARN    [API] /challenges/daily failed, using fallback: Failed to fetch
+[00:09:54.561] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:09:55.328] Browser WARN    Detected `scroll-behavior: smooth` on the `<html>` element. To disable smooth scrolling during route transitions, add `data-scroll-behavior="smooth"` to your <html> element. Learn more: https://nextjs.org/docs/messages/missing-data-scroll-behavior
+[00:09:57.741] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:09:57.741] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:09:57.741] Browser WARN    [API] /notifications?student_id=student_001 failed, using fallback: Failed to fetch
+[00:09:57.741] Browser WARN    [API] /student/profile?student_id=student_001 failed, using fallback: Failed to fetch
+[00:12:54.129] Server  LOG     ✓ Compiled in 643ms
+[00:13:06.592] Server  LOG     ✓ Compiled in 495ms
+[00:14:05.015] Server  LOG       Reload env: .env
+[00:14:05.561] Server  LOG     ✓ Compiled in 203ms
+[00:14:14.982] Server  LOG       Reload env: .env
+[00:14:15.800] Server  LOG     ✓ Compiled in 0ms
+[00:14:49.084] Browser INFO    %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold
+[00:15:29.695] Browser WARN    Detected `scroll-behavior: smooth` on the `<html>` element. To disable smooth scrolling during route transitions, add `data-scroll-behavior="smooth"` to your <html> element. Learn more: https://nextjs.org/docs/messages/missing-data-scroll-behavior
+[00:15:41.389] Browser LOG     [CameraFeed] Stopping camera
+[00:15:44.014] Browser LOG     [CameraFeed] Stopping camera
+[00:18:27.826] Server  LOG     ✓ Compiled in 521ms
+[00:18:37.341] Server  LOG     ✓ Compiled in 591ms
+[00:18:40.548] Server  LOG     ✓ Compiled in 252ms
+[00:19:55.011] Browser WARN    [API] /content/courses/auto/auto_74c9c58152/save failed, using fallback: API 404: Not Found
+[00:19:56.986] Browser WARN    [API] /content/courses/auto/auto_74c9c58152/save failed, using fallback: API 404: Not Found
+[00:20:08.933] Browser LOG     [CameraFeed] Stopping camera
+[00:20:15.736] Browser LOG     [CameraFeed] Stopping camera
+[00:20:58.548] Browser WARN    [API] /content/courses/auto/auto_a70d6c100a/save failed, using fallback: API 404: Not Found
+[00:21:02.728] Browser WARN    [API] /content/courses/auto/auto_a70d6c100a/save failed, using fallback: API 404: Not Found
+[00:21:13.428] Browser WARN    [API] /content/courses/auto/auto_a70d6c100a/save failed, using fallback: API 404: Not Found
+[00:21:14.517] Browser WARN    [API] /content/courses/auto/auto_a70d6c100a/save failed, using fallback: API 404: Not Found
+[00:22:39.870] Server  LOG     ✓ Compiled in 1076ms
+[00:22:46.733] Server  LOG     ✓ Compiled in 540ms
+[00:27:05.477] Browser WARN    [API] /content/courses/auto/auto_a70d6c100a/save failed, using fallback: API 404: Not Found
+[00:27:25.387] Browser WARN    [API] /courses/auto_a70d6c100a failed, using fallback: API 404: Not Found
+[00:27:25.387] Browser WARN    [API] /courses/auto_a70d6c100a failed, using fallback: API 404: Not Found
+[00:27:25.633] Browser LOG     [CameraFeed] Stopping camera
+[00:27:35.522] Browser LOG     [CameraFeed] Stopping camera
+[00:28:15.121] Browser WARN    [API] /courses/auto_a70d6c100a failed, using fallback: API 404: Not Found
+[00:28:15.121] Browser WARN    [API] /courses/auto_a70d6c100a failed, using fallback: API 404: Not Found
+[00:28:15.302] Browser LOG     [CameraFeed] Stopping camera
+[00:28:40.545] Server  LOG     ✓ Compiled in 1218ms
