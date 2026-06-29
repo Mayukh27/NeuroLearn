@@ -203,6 +203,10 @@ class AdaptiveResponse(BaseModel):
     next_assessment_difficulty: Literal["easy", "medium", "hard"]
     strength_areas: list[str]
     weak_areas: list[str]
+    # Phase 11 addition (additive, Optional — old clients unaffected):
+    # full Cognitive Readiness Score breakdown, so the frontend can render
+    # the CSR gauge/component bars in Phase 13 without a second API call.
+    csr: Optional[dict] = None
 
 
 class AssessmentResult(BaseModel):
@@ -220,6 +224,13 @@ class AssessmentResult(BaseModel):
     next_difficulty: Literal["easy", "medium", "hard"]
     suggested_topics: list[str]
     adaptive_response: AdaptiveResponse
+    # Phase 10/12 additions (additive, Optional — old clients unaffected).
+    # `student_id` was already silently present in the dict returned by
+    # submit_assessment() before this change but was being dropped by
+    # FastAPI's response_model filtering since it was never declared here;
+    # `timestamp` is new, needed for get_recent_scores_pct() DB ordering.
+    student_id: Optional[str] = None
+    timestamp: Optional[float] = None
 
 
 # ── Leaderboard ─────────────────────────────────────────────

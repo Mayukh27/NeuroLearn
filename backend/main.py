@@ -29,6 +29,7 @@ from routers import (
     gamification_router,
     report_router,
     content_router,          # ← NEW: Auto Course Generator
+    csr_router,               # ← Phase 11 (NeuroLearn-MCL): CSR read endpoints
 )
 
 # Import database seeding
@@ -115,6 +116,7 @@ app.include_router(assessment_router)
 app.include_router(gamification_router)
 app.include_router(report_router)
 app.include_router(content_router)     # ← NEW
+app.include_router(csr_router)         # ← Phase 11 (NeuroLearn-MCL)
 
 
 # ── Health Check ──

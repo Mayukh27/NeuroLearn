@@ -1,5 +1,14 @@
 # NeuroLearn Backend — Python dependencies
 # Install: pip install -r requirements.txt
+#
+# FIX (CR4, peer review packet): this file previously contained an
+# unresolved git merge conflict (two diverging dependency blocks left
+# in place by mistake) at the original lines 10, 22, and 26, which made
+# `pip install -r requirements.txt` abort before reaching any dependency.
+# Both diverging
+# branches are merged below and duplicate ML packages are de-duplicated,
+# keeping the stricter/more specific version pin where the two branches
+# disagreed (e.g. mediapipe==0.10.14 over the looser >=0.10.9 floor).
 
 # ── Web Framework ──────────────────────────────────────────
 fastapi>=0.110.0
@@ -7,33 +16,24 @@ uvicorn[standard]>=0.27.0
 python-multipart>=0.0.9
 python-dotenv>=1.0.0
 
-<<<<<<< Updated upstream
-# --- ML / AI ---
-torch
+# ── Data / Storage ─────────────────────────────────────────
+tinydb>=4.8.0
+pydantic>=2.6.0
+
+# ── ML / AI ────────────────────────────────────────────────
+torch>=2.2.0
 torchvision==0.19.1
 transformers==4.44.2
 accelerate==0.34.2
 sentencepiece==0.2.0
+openai-whisper>=20231117
+
+# ── Attention / Vision ──────────────────────────────────────
 opencv-python-headless==4.10.0.84
 mediapipe==0.10.14
 numpy==1.26.4
 scipy==1.14.1
 Pillow==10.4.0
-=======
-# ── Data / Storage ─────────────────────────────────────────
-tinydb>=4.8.0
-pydantic>=2.6.0
->>>>>>> Stashed changes
-
-# ── ML / AI ────────────────────────────────────────────────
-openai-whisper>=20231117
-transformers>=4.38.0
-torch>=2.2.0
-sentencepiece>=0.2.0
-
-# ── Attention / Vision ─────────────────────────────────────
-mediapipe>=0.10.9
-opencv-python-headless>=4.9.0
 
 # ── Logging ────────────────────────────────────────────────
 loguru>=0.7.2
@@ -45,7 +45,7 @@ jinja2>=3.1.3
 # ── Email ──────────────────────────────────────────────────
 aiosmtplib>=3.0.1
 
-# ── NEW: Web Scraping (Auto Course Generator) ─────────────
+# ── Web Scraping (Auto Course Generator) ────────────────────
 # Primary scraper: Playwright (headless Chromium)
 playwright>=1.43.0
 # After install, run: python -m playwright install chromium

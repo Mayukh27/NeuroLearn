@@ -23,6 +23,12 @@ notifications_table = db.table("notifications")
 attention_logs_table = db.table("attention_logs")
 transcripts_table = db.table("transcripts")
 auto_courses_table = db.table("auto_courses")
+# Phase 10 (NeuroLearn-MCL implementation spec): persistent CSR history.
+# One record per assessment, holding every CSR component (P, A, I, T, C),
+# the fused CSR, the selected difficulty, and the adaptive explanation —
+# this is the durable replacement for AdaptiveEngine._history's in-memory
+# dict (CR1/MJ4 in the peer review packet: history must survive a restart).
+csr_history_table = db.table("csr_history")
 
 def seed_database():
     """Populate database with initial dummy data if empty."""
@@ -193,6 +199,116 @@ def save_assessment_result(result: dict):
 def get_student_results(student_id: str) -> list[dict]:
     Q = Query()
     return results_table.search(Q.student_id == student_id)
+
+
+# ── Phase 10: persistent CSR history ───────────────────────────────────
+#
+# Design note: one record per assessment holds every component (P, A, I,
+# T, C, CSR, difficulty, explanation), per the implementation spec's
+# Phase 10 requirement ("Each assessment record must permanently store
+# ... Performance ... Attention ... Integrity ... Trend ... Complexity
+# ... Final CSR ... Selected Difficulty ... Adaptive Explanation").
+# The six "history" getters below (performance/attention/integrity/trend/
+# complexity/csr) are projections over this ONE table rather than six
+# separate tables — this avoids duplicating the same timestamp/student_id/
+# assessment_id across six tables and keeps a single source of truth, while
+# still satisfying Phase 11's "GET /<component>/history" endpoints, each of
+# which just needs one field's time series.
+
+def save_csr_record(record: dict) -> dict:
+    """
+    Persist one CSR computation. Expected keys (all required except
+    `assessment_id`, which may be None for pre-assessment / initial-
+    difficulty calls per get_initial_difficulty):
+
+        student_id, assessment_id, timestamp,
+        performance, attention, integrity, trend, complexity,
+        csr, difficulty, explanation
+
+    Returns the same dict (with TinyDB's internal doc_id NOT included —
+    callers should not depend on TinyDB internals).
+    """
+    required = {
+        "student_id", "timestamp", "performance", "attention", "integrity",
+        "trend", "complexity", "csr", "difficulty", "explanation",
+    }
+    missing = required - record.keys()
+    if missing:
+        raise ValueError(f"save_csr_record missing required fields: {sorted(missing)}")
+
+    record = dict(record)
+    record.setdefault("assessment_id", None)
+    csr_history_table.insert(record)
+    logger.info(
+        f"CSR persisted: student={record['student_id']} csr={record['csr']:.3f} "
+        f"difficulty={record['difficulty']}"
+    )
+    return record
+
+
+def get_csr_history(student_id: str, limit: Optional[int] = None) -> list[dict]:
+    """Full CSR history (every component + fused score) for one student,
+    ordered oldest-first. Pass `limit` to get only the most recent N."""
+    Q = Query()
+    records = csr_history_table.search(Q.student_id == student_id)
+    records.sort(key=lambda r: r.get("timestamp", 0))
+    return records[-limit:] if limit else records
+
+
+def get_current_csr(student_id: str) -> Optional[dict]:
+    """Most recent CSR record for a student, or None if they have no history yet."""
+    history = get_csr_history(student_id)
+    return history[-1] if history else None
+
+
+def _component_history(student_id: str, component: str, limit: Optional[int]) -> list[dict]:
+    """Shared implementation for the five per-component history getters
+    below — each just projects one field out of the full CSR record,
+    keeping {timestamp, assessment_id, value} so the frontend dashboards
+    in Phase 13 can plot a simple time series without extra joins."""
+    records = get_csr_history(student_id, limit=limit)
+    return [
+        {
+            "timestamp": r["timestamp"],
+            "assessment_id": r.get("assessment_id"),
+            "value": r[component],
+        }
+        for r in records
+    ]
+
+
+def get_performance_history(student_id: str, limit: Optional[int] = None) -> list[dict]:
+    return _component_history(student_id, "performance", limit)
+
+
+def get_attention_history(student_id: str, limit: Optional[int] = None) -> list[dict]:
+    return _component_history(student_id, "attention", limit)
+
+
+def get_integrity_history(student_id: str, limit: Optional[int] = None) -> list[dict]:
+    return _component_history(student_id, "integrity", limit)
+
+
+def get_trend_history(student_id: str, limit: Optional[int] = None) -> list[dict]:
+    return _component_history(student_id, "trend", limit)
+
+
+def get_complexity_history(student_id: str, limit: Optional[int] = None) -> list[dict]:
+    return _component_history(student_id, "complexity", limit)
+
+
+def get_recent_scores_pct(student_id: str, limit: int = 5) -> list[float]:
+    """
+    Convenience helper for AdaptiveEngine: pulls recent assessment scores
+    (as percentages) from the DURABLE `results_table`, not the in-memory
+    dict. This is the one change needed in adaptive_engine.py to make
+    Performance (P) and Trend (T) survive a server restart — see
+    ml/adaptive_engine.py's updated `_scores_for()`.
+    """
+    results = get_student_results(student_id)
+    results.sort(key=lambda r: r.get("timestamp", 0))
+    scores = [r["score"] for r in results if "score" in r]
+    return scores[-limit:]
 
 
 def log_attention(log: dict):

@@ -23,6 +23,8 @@ from data.database import (
     get_assessment_session,
     save_assessment_result,
     get_student_results,
+    get_recent_scores_pct,
+    save_csr_record,
 )
 
 router = APIRouter(prefix="/api/assessment", tags=["Assessment"])
@@ -77,6 +79,12 @@ async def generate_assessment(request: GenerateAssessmentRequest):
         "adaptive_metadata": adaptive_metadata,
         "student_id": request.student_id,
         "created_at": time.time(),
+        # Phase 10/12 addition: persisted so submit_assessment() can feed the
+        # SAME transcript into the Content Complexity (C) component when
+        # scoring this session, rather than complexity silently defaulting
+        # to neutral on every submission (the practical consequence of CR2
+        # if this field weren't threaded through).
+        "transcript_text": transcript_text,
     }
 
     # Save session
@@ -125,7 +133,19 @@ async def submit_assessment(request: SubmitAssessmentRequest):
     percentage = round((correct_count / max(len(questions), 1)) * 100, 1)
     xp_earned = int(earned_points * 1.5)
 
-    # Run adaptive engine
+    # Phase 12 fix: pull score history from the DURABLE results_table
+    # instead of relying solely on AdaptiveEngine's in-memory dict, so
+    # Performance (P) and Trend (T) survive a server restart — directly
+    # addresses CR1/MJ4 from the peer review packet.
+    previous_scores = get_recent_scores_pct(request.student_id, limit=5)
+
+    # Approximate "was this attempt correct" for the Integrity (I)
+    # component's explanation text as "majority correct" — note this does
+    # NOT affect the integrity score itself (response_integrity.py scores
+    # timing alone, per the CR3 fix), only the human-readable reason string.
+    was_correct = percentage >= 50.0
+
+    # Run adaptive engine (CSR-driven — see ml/adaptive_engine.py)
     adaptive_result = adaptive_engine.determine_difficulty(
         student_id=request.student_id,
         current_score=percentage,
@@ -133,6 +153,9 @@ async def submit_assessment(request: SubmitAssessmentRequest):
         time_spent=request.time_spent,
         time_limit=session.get("time_limit", 420),
         previous_difficulty=session.get("difficulty", "medium"),
+        previous_scores=previous_scores,
+        transcript_text=session.get("transcript_text"),
+        was_correct=was_correct,
     )
 
     # Generate result message
@@ -170,17 +193,42 @@ async def submit_assessment(request: SubmitAssessmentRequest):
         "message": message,
         "next_difficulty": adaptive_result["next_assessment_difficulty"],
         "suggested_topics": suggested,
+        # Phase 12 addition: needed so get_recent_scores_pct() can order
+        # history correctly across restarts (previously absent entirely).
+        "timestamp": time.time(),
         "adaptive_response": {
             "performance_trend": adaptive_result["performance_trend"],
             "recommended_action": adaptive_result["recommended_action"],
             "next_assessment_difficulty": adaptive_result["next_assessment_difficulty"],
             "strength_areas": adaptive_result["strength_areas"],
             "weak_areas": adaptive_result["weak_areas"],
+            # Phase 11 addition: surfaces the full CSR breakdown to the
+            # frontend (Phase 13 dashboards read this same shape).
+            "csr": adaptive_result.get("csr"),
         },
     }
 
-    # Save result
+    # Save result (unchanged — durable assessment_results table)
     save_assessment_result(result)
+
+    # Phase 10: persist the full CSR record as its own durable history
+    # entry, independent of the legacy results_table, so each component
+    # (P, A, I, T, C) has its own queryable time series.
+    csr_block = adaptive_result.get("csr")
+    if csr_block:
+        save_csr_record({
+            "student_id": request.student_id,
+            "assessment_id": request.session_id,
+            "timestamp": result["timestamp"],
+            "performance": csr_block["components"]["performance"],
+            "attention": csr_block["components"]["attention"],
+            "integrity": csr_block["components"]["integrity"],
+            "trend": csr_block["components"]["trend"],
+            "complexity": csr_block["components"]["complexity"],
+            "csr": csr_block["score"],
+            "difficulty": adaptive_result["next_assessment_difficulty"],
+            "explanation": csr_block["explanation"],
+        })
 
     return result
 

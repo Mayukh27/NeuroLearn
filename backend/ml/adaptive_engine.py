@@ -1,33 +1,76 @@
+"""
+backend/ml/adaptive_engine.py
 
+Adaptive Engine — Phase 9 of the implementation spec.
+
+FIXES CR1 (peer review packet) at the integration point: previously,
+determine_difficulty() ran a rule cascade (score baseline + integer
+modifiers, clamped to 3 tiers). It now computes the Cognitive Readiness
+Score (CSR) via ml/csr.py and selects difficulty from configurable CSR
+thresholds (config/csr_config.py: DifficultyThresholds), per Phase 9:
+
+    CSR > hard_threshold   -> "hard"
+    medium..hard           -> "medium"
+    CSR < medium_threshold -> "easy"
+
+BACKWARD COMPATIBILITY: the public method signatures of
+`determine_difficulty()` and `get_initial_difficulty()` are UNCHANGED, so
+routers/assessment.py does not need to change to pick this up. The legacy
+rule cascade is preserved as `_determine_difficulty_legacy()` and is still
+reachable by setting `CSR_CONFIG.csr_enabled = False` (e.g. for an A/B
+comparison between the two engines, which is one of the three evaluation
+options the review packet's §5 suggests) — it is not deleted, per the
+spec's "no placeholder implementations ... backward compatible" standard.
+
+NOTE on history: `_history` remains an in-memory dict for this phase,
+identical to the legacy engine's storage. This still does not survive a
+process restart. The peer review packet's CR1/MJ4 concerns and the
+implementation spec's Phase 8 (persistent CSR history) call for moving
+this into TinyDB — that is intentionally NOT done in this file, since it
+requires a schema change (Phase 13) and new persistence functions
+(Phase 8), which are the next stop-point, not bundled into this change.
+`compute_csr()` itself is storage-agnostic — it accepts history as a plain
+list — so swapping the source from `self._history` to a TinyDB-backed
+query later is a small, localized change in this file only.
+"""
+
+from __future__ import annotations
 
 import time
 from typing import Optional
+
 from loguru import logger
+
+from config.csr_config import CSR_CONFIG
+from ml.csr import compute_csr, CSRResult
 
 
 class AdaptiveEngine:
-   
 
     DIFFICULTY_LEVELS = ["easy", "medium", "hard"]
 
-    # Score thresholds
+    # ── Legacy rule-cascade constants (kept for the CSR-disabled fallback
+    # path only — do not use these in the CSR-driven path below). ──
     UPGRADE_THRESHOLD = 80
     MAINTAIN_THRESHOLD = 50
-
-    # Attention modifiers
     LOW_ATTENTION_THRESHOLD = 40
     HIGH_ATTENTION_BONUS_THRESHOLD = 85
-
-    # Time pressure: if completed in < 30% of time limit, they might be guessing
     SPEED_GUESS_RATIO = 0.3
-    # If completed thoughtfully (50-80% of time), give slight bonus
     THOUGHTFUL_RATIO_LOW = 0.5
     THOUGHTFUL_RATIO_HIGH = 0.8
 
     def __init__(self):
-        # In-memory history (in production, use database)
+        # In-memory history (Phase 8 will move this to TinyDB — see module
+        # docstring). Each entry: {score, difficulty, attention, time_spent,
+        # time_limit, was_correct, timestamp}.
         self._history: dict[str, list[dict]] = {}
-        logger.info("Adaptive engine initialized")
+        logger.info(
+            f"Adaptive engine initialized (csr_enabled={CSR_CONFIG.csr_enabled})"
+        )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Public API — UNCHANGED signatures (backward compatible)
+    # ──────────────────────────────────────────────────────────────────
 
     def determine_difficulty(
         self,
@@ -38,106 +81,67 @@ class AdaptiveEngine:
         time_limit: int,
         previous_difficulty: str = "medium",
         previous_scores: Optional[list[float]] = None,
+        transcript_text: Optional[str] = None,
+        was_correct: Optional[bool] = None,
     ) -> dict:
         """
         Determine optimal next difficulty.
 
-        Returns JSON-serializable adaptive response.
+        Two NEW optional kwargs are added at the end (`transcript_text`,
+        `was_correct`) so existing callers that don't pass them keep working
+        unchanged (they fall back to neutral defaults inside compute_csr),
+        while routers/assessment.py can be updated to actually pass a real
+        transcript and correctness flag in a follow-up change (Phase 11/13)
+        without breaking this signature again.
+
+        Returns the same top-level keys the legacy engine returned
+        (`performance_trend`, `recommended_action`,
+        `next_assessment_difficulty`, `strength_areas`, `weak_areas`,
+        `_debug`), plus a new `csr` block with the full CSR breakdown, so
+        existing frontend code that only reads the old keys is unaffected.
         """
-        # ── Step 1: Score-based baseline ──
-        if current_score >= self.UPGRADE_THRESHOLD:
-            baseline = self._level_up(previous_difficulty)
-            score_action = "upgrade"
-        elif current_score >= self.MAINTAIN_THRESHOLD:
-            baseline = previous_difficulty
-            score_action = "maintain"
-        else:
-            baseline = self._level_down(previous_difficulty)
-            score_action = "downgrade"
+        if not CSR_CONFIG.csr_enabled:
+            return self._determine_difficulty_legacy(
+                student_id, current_score, attention_score, time_spent,
+                time_limit, previous_difficulty, previous_scores,
+            )
 
-        # ── Step 2: Attention modifier ──
-        attention_modifier = 0
-        if attention_score < self.LOW_ATTENTION_THRESHOLD:
-            attention_modifier = -1  # Low attention → easier content
-            logger.info(f"Low attention ({attention_score}) → reducing difficulty")
-        elif attention_score >= self.HIGH_ATTENTION_BONUS_THRESHOLD and current_score >= 70:
-            attention_modifier = 0  # High attention reinforces but doesn't force upgrade
+        scores_history = self._scores_for(student_id, previous_scores, current_score)
 
-        # ── Step 3: Time analysis ──
-        time_ratio = time_spent / max(time_limit, 1)
-        time_modifier = 0
-        time_note = ""
-
-        if time_ratio < self.SPEED_GUESS_RATIO and current_score < 70:
-            time_modifier = -1
-            time_note = "Very fast completion with low score suggests guessing"
-        elif self.THOUGHTFUL_RATIO_LOW <= time_ratio <= self.THOUGHTFUL_RATIO_HIGH:
-            time_note = "Thoughtful pace — good engagement"
-
-        # ── Step 4: Historical trend ──
-        trend = self._analyze_trend(student_id, current_score, previous_scores)
-        trend_modifier = 0
-        if trend == "declining" and score_action != "downgrade":
-            trend_modifier = -1
-            logger.info(f"Declining trend detected for {student_id}")
-
-        # ── Step 5: Aggregate ──
-        current_idx = self.DIFFICULTY_LEVELS.index(baseline)
-        total_modifier = attention_modifier + time_modifier + trend_modifier
-
-        # Clamp to valid range
-        final_idx = max(0, min(2, current_idx + total_modifier))
-        next_difficulty = self.DIFFICULTY_LEVELS[final_idx]
-
-        # ── Build reason string ──
-        reasons = [f"Score: {current_score:.0f}% → {score_action}"]
-        if attention_modifier != 0:
-            reasons.append(f"Attention: {attention_score:.0f}% (low → easier)")
-        if time_modifier != 0:
-            reasons.append(time_note)
-        if trend_modifier != 0:
-            reasons.append(f"Trend: {trend} → reducing difficulty")
-
-        reason = " | ".join(reasons)
-
-        # ── Determine strength/weak areas ──
-        strengths, weaknesses = self._analyze_areas(current_score, attention_score)
-
-        # ── Recommended action message ──
-        action_messages = {
-            ("hard", "improving"): "Outstanding! You're mastering this material. Moving to advanced content.",
-            ("hard", "stable"): "Great performance! Continue with challenging material.",
-            ("hard", "declining"): "You've been doing well but recent scores dipped. Let's reinforce with some review.",
-            ("medium", "improving"): "Good progress! Keep building — you'll unlock harder content soon.",
-            ("medium", "stable"): "Solid and steady. Keep practicing at this level.",
-            ("medium", "declining"): "You seem to be struggling a bit. Let's reinforce the fundamentals.",
-            ("easy", "improving"): "You're getting stronger! This easier content will help build confidence.",
-            ("easy", "stable"): "Take your time to build a strong foundation. You're doing fine!",
-            ("easy", "declining"): "Don't worry! Let's go through the basics again. Rewatch the video if needed.",
-        }
-        recommended_action = action_messages.get(
-            (next_difficulty, trend),
-            "Keep learning! Every step counts."
+        csr_result: CSRResult = compute_csr(
+            recent_scores_pct=scores_history,
+            attention_score_pct=attention_score,
+            time_spent=time_spent,
+            time_limit=time_limit,
+            was_correct=was_correct,
+            transcript_text=transcript_text,
         )
 
-        # ── Store in history ──
-        self._record_history(student_id, current_score, next_difficulty, attention_score)
+        trend_label = csr_result.detail["trend"]["label"]
+        strengths, weaknesses = self._analyze_areas(current_score, attention_score)
+        recommended_action = self._recommended_action(csr_result.difficulty, trend_label)
+
+        self._record_history(
+            student_id, current_score, csr_result.difficulty, attention_score,
+            time_spent=time_spent, time_limit=time_limit, was_correct=was_correct,
+        )
 
         return {
-            "performance_trend": trend,
+            "performance_trend": trend_label,
             "recommended_action": recommended_action,
-            "next_assessment_difficulty": next_difficulty,
+            "next_assessment_difficulty": csr_result.difficulty,
             "strength_areas": strengths,
             "weak_areas": weaknesses,
+            "csr": {
+                "score": csr_result.csr,
+                "score_pct": csr_result.csr_pct,
+                "components": csr_result.components.as_dict(),
+                "weights_used": csr_result.weights_used,
+                "explanation": csr_result.explanation,
+            },
             "_debug": {
-                "baseline": baseline,
-                "modifiers": {
-                    "attention": attention_modifier,
-                    "time": time_modifier,
-                    "trend": trend_modifier,
-                },
-                "reason": reason,
-                "time_ratio": round(time_ratio, 2),
+                "engine": "csr",
+                "reason": csr_result.explanation,
             },
         }
 
@@ -149,82 +153,76 @@ class AdaptiveEngine:
     ) -> dict:
         """
         Determine initial assessment difficulty before quiz starts.
-
-        Returns JSON with difficulty and adaptive metadata.
+        Signature UNCHANGED for backward compatibility.
         """
-        difficulty = "medium"
-        reason = "Default medium difficulty for first attempt"
+        if not CSR_CONFIG.csr_enabled:
+            return self._get_initial_difficulty_legacy(student_id, attention_score, previous_score)
 
+        scores_history = self._history.get(student_id, [])
+        recent_scores = [h["score"] for h in scores_history[-5:]]
         if previous_score is not None:
-            if previous_score >= 80:
-                difficulty = "hard"
-                reason = f"Previous score {previous_score:.0f}% → hard difficulty"
-            elif previous_score >= 50:
-                difficulty = "medium"
-                reason = f"Previous score {previous_score:.0f}% → medium difficulty"
-            else:
-                difficulty = "easy"
-                reason = f"Previous score {previous_score:.0f}% → easy for reinforcement"
+            recent_scores = recent_scores + [previous_score]
 
-        # Attention adjustment
-        if attention_score < self.LOW_ATTENTION_THRESHOLD and difficulty != "easy":
-            old_diff = difficulty
-            difficulty = self._level_down(difficulty)
-            reason += f" | Low attention ({attention_score:.0f}%) → {old_diff} reduced to {difficulty}"
+        csr_result: CSRResult = compute_csr(
+            recent_scores_pct=recent_scores or None,
+            attention_score_pct=attention_score,
+            # No timing/correctness yet — compute_csr defaults Integrity to
+            # its neutral maximum (see csr.py docstring) so a student isn't
+            # penalized before answering anything.
+        )
+
+        reason = (
+            f"Initial CSR={csr_result.csr:.2f} -> '{csr_result.difficulty}'. "
+            f"{csr_result.explanation}"
+        )
 
         return {
-            "difficulty": difficulty,
+            "difficulty": csr_result.difficulty,
             "adaptive_metadata": {
                 "previous_score": previous_score,
-                "adjusted_difficulty": difficulty,
+                "adjusted_difficulty": csr_result.difficulty,
                 "reason": reason,
+                "csr": csr_result.csr,
             },
         }
 
-    def _level_up(self, current: str) -> str:
-        idx = self.DIFFICULTY_LEVELS.index(current)
-        return self.DIFFICULTY_LEVELS[min(idx + 1, 2)]
+    # ──────────────────────────────────────────────────────────────────
+    # Helpers (CSR-driven path)
+    # ──────────────────────────────────────────────────────────────────
 
-    def _level_down(self, current: str) -> str:
-        idx = self.DIFFICULTY_LEVELS.index(current)
-        return self.DIFFICULTY_LEVELS[max(idx - 1, 0)]
-
-    def _analyze_trend(
+    def _scores_for(
         self,
         student_id: str,
+        previous_scores: Optional[list[float]],
         current_score: float,
-        previous_scores: Optional[list[float]] = None,
-    ) -> str:
-        """Analyze performance trend from history."""
-        history = self._history.get(student_id, [])
-        scores = [h["score"] for h in history[-5:]]  # Last 5 assessments
-
+    ) -> list[float]:
+        """Build the score history list (most-recent-last) used by both
+        Performance and Trend, mirroring the legacy engine's source-of-truth
+        precedence: explicit `previous_scores` argument wins over the
+        in-memory history, then the current score is appended."""
         if previous_scores:
-            scores = previous_scores[-5:]
-
-        scores.append(current_score)
-
-        if len(scores) < 2:
-            return "stable"
-
-        # Check last 3 scores
-        recent = scores[-3:] if len(scores) >= 3 else scores
-
-        if all(recent[i] <= recent[i - 1] for i in range(1, len(recent))):
-            return "declining"
-        elif all(recent[i] >= recent[i - 1] for i in range(1, len(recent))):
-            return "improving"
+            scores = list(previous_scores[-5:])
         else:
-            # Compute average trend
-            avg_change = sum(recent[i] - recent[i - 1] for i in range(1, len(recent))) / (len(recent) - 1)
-            if avg_change > 5:
-                return "improving"
-            elif avg_change < -5:
-                return "declining"
-            return "stable"
+            scores = [h["score"] for h in self._history.get(student_id, [])[-5:]]
+        scores.append(current_score)
+        return scores
+
+    def _recommended_action(self, difficulty: str, trend_label: str) -> str:
+        action_messages = {
+            ("hard", "improving"): "Outstanding! You're mastering this material. Moving to advanced content.",
+            ("hard", "stable"): "Great performance! Continue with challenging material.",
+            ("hard", "declining"): "You've been doing well but recent scores dipped. Let's reinforce with some review.",
+            ("medium", "improving"): "Good progress! Keep building — you'll unlock harder content soon.",
+            ("medium", "stable"): "Solid and steady. Keep practicing at this level.",
+            ("medium", "declining"): "You seem to be struggling a bit. Let's reinforce the fundamentals.",
+            ("easy", "improving"): "You're getting stronger! This easier content will help build confidence.",
+            ("easy", "stable"): "Take your time to build a strong foundation. You're doing fine!",
+            ("easy", "declining"): "Don't worry! Let's go through the basics again. Rewatch the video if needed.",
+        }
+        return action_messages.get((difficulty, trend_label), "Keep learning! Every step counts.")
 
     def _analyze_areas(self, score: float, attention: float) -> tuple[list[str], list[str]]:
-        """Determine strength and weakness areas from metrics."""
+        """Unchanged from the legacy engine — not part of CSR, just display copy."""
         strengths = []
         weaknesses = []
 
@@ -243,8 +241,16 @@ class AdaptiveEngine:
 
         return strengths, weaknesses
 
-    def _record_history(self, student_id: str, score: float, difficulty: str, attention: float):
-        """Store assessment in memory history."""
+    def _record_history(
+        self,
+        student_id: str,
+        score: float,
+        difficulty: str,
+        attention: float,
+        time_spent: Optional[float] = None,
+        time_limit: Optional[float] = None,
+        was_correct: Optional[bool] = None,
+    ):
         if student_id not in self._history:
             self._history[student_id] = []
 
@@ -252,12 +258,168 @@ class AdaptiveEngine:
             "score": score,
             "difficulty": difficulty,
             "attention": attention,
+            "time_spent": time_spent,
+            "time_limit": time_limit,
+            "was_correct": was_correct,
             "timestamp": time.time(),
         })
 
-        # Keep last 20 entries
         self._history[student_id] = self._history[student_id][-20:]
 
+    # ──────────────────────────────────────────────────────────────────
+    # Legacy rule cascade — preserved verbatim, reachable only when
+    # CSR_CONFIG.csr_enabled is False. Do not extend this path; extend
+    # the CSR modules instead.
+    # ──────────────────────────────────────────────────────────────────
 
-# ── Singleton ──
+    def _determine_difficulty_legacy(
+        self,
+        student_id: str,
+        current_score: float,
+        attention_score: float,
+        time_spent: int,
+        time_limit: int,
+        previous_difficulty: str = "medium",
+        previous_scores: Optional[list[float]] = None,
+    ) -> dict:
+        if current_score >= self.UPGRADE_THRESHOLD:
+            baseline = self._level_up(previous_difficulty)
+            score_action = "upgrade"
+        elif current_score >= self.MAINTAIN_THRESHOLD:
+            baseline = previous_difficulty
+            score_action = "maintain"
+        else:
+            baseline = self._level_down(previous_difficulty)
+            score_action = "downgrade"
+
+        attention_modifier = 0
+        if attention_score < self.LOW_ATTENTION_THRESHOLD:
+            attention_modifier = -1
+        elif attention_score >= self.HIGH_ATTENTION_BONUS_THRESHOLD and current_score >= 70:
+            attention_modifier = 0
+
+        time_ratio = time_spent / max(time_limit, 1)
+        time_modifier = 0
+        time_note = ""
+        if time_ratio < self.SPEED_GUESS_RATIO and current_score < 70:
+            time_modifier = -1
+            time_note = "Very fast completion with low score suggests guessing"
+        elif self.THOUGHTFUL_RATIO_LOW <= time_ratio <= self.THOUGHTFUL_RATIO_HIGH:
+            time_note = "Thoughtful pace — good engagement"
+
+        trend = self._analyze_trend_legacy(student_id, current_score, previous_scores)
+        trend_modifier = 0
+        if trend == "declining" and score_action != "downgrade":
+            trend_modifier = -1
+
+        current_idx = self.DIFFICULTY_LEVELS.index(baseline)
+        total_modifier = attention_modifier + time_modifier + trend_modifier
+        final_idx = max(0, min(2, current_idx + total_modifier))
+        next_difficulty = self.DIFFICULTY_LEVELS[final_idx]
+
+        reasons = [f"Score: {current_score:.0f}% -> {score_action}"]
+        if attention_modifier != 0:
+            reasons.append(f"Attention: {attention_score:.0f}% (low -> easier)")
+        if time_modifier != 0:
+            reasons.append(time_note)
+        if trend_modifier != 0:
+            reasons.append(f"Trend: {trend} -> reducing difficulty")
+        reason = " | ".join(reasons)
+
+        strengths, weaknesses = self._analyze_areas(current_score, attention_score)
+        recommended_action = self._recommended_action(next_difficulty, trend)
+
+        self._record_history(student_id, current_score, next_difficulty, attention_score)
+
+        return {
+            "performance_trend": trend,
+            "recommended_action": recommended_action,
+            "next_assessment_difficulty": next_difficulty,
+            "strength_areas": strengths,
+            "weak_areas": weaknesses,
+            "_debug": {
+                "engine": "legacy_rule_cascade",
+                "baseline": baseline,
+                "modifiers": {
+                    "attention": attention_modifier,
+                    "time": time_modifier,
+                    "trend": trend_modifier,
+                },
+                "reason": reason,
+                "time_ratio": round(time_ratio, 2),
+            },
+        }
+
+    def _get_initial_difficulty_legacy(
+        self,
+        student_id: str,
+        attention_score: float,
+        previous_score: Optional[float] = None,
+    ) -> dict:
+        difficulty = "medium"
+        reason = "Default medium difficulty for first attempt"
+
+        if previous_score is not None:
+            if previous_score >= 80:
+                difficulty = "hard"
+                reason = f"Previous score {previous_score:.0f}% -> hard difficulty"
+            elif previous_score >= 50:
+                difficulty = "medium"
+                reason = f"Previous score {previous_score:.0f}% -> medium difficulty"
+            else:
+                difficulty = "easy"
+                reason = f"Previous score {previous_score:.0f}% -> easy for reinforcement"
+
+        if attention_score < self.LOW_ATTENTION_THRESHOLD and difficulty != "easy":
+            old_diff = difficulty
+            difficulty = self._level_down(difficulty)
+            reason += f" | Low attention ({attention_score:.0f}%) -> {old_diff} reduced to {difficulty}"
+
+        return {
+            "difficulty": difficulty,
+            "adaptive_metadata": {
+                "previous_score": previous_score,
+                "adjusted_difficulty": difficulty,
+                "reason": reason,
+            },
+        }
+
+    def _level_up(self, current: str) -> str:
+        idx = self.DIFFICULTY_LEVELS.index(current)
+        return self.DIFFICULTY_LEVELS[min(idx + 1, 2)]
+
+    def _level_down(self, current: str) -> str:
+        idx = self.DIFFICULTY_LEVELS.index(current)
+        return self.DIFFICULTY_LEVELS[max(idx - 1, 0)]
+
+    def _analyze_trend_legacy(
+        self,
+        student_id: str,
+        current_score: float,
+        previous_scores: Optional[list[float]] = None,
+    ) -> str:
+        history = self._history.get(student_id, [])
+        scores = [h["score"] for h in history[-5:]]
+        if previous_scores:
+            scores = previous_scores[-5:]
+        scores.append(current_score)
+
+        if len(scores) < 2:
+            return "stable"
+
+        recent = scores[-3:] if len(scores) >= 3 else scores
+        if all(recent[i] <= recent[i - 1] for i in range(1, len(recent))):
+            return "declining"
+        elif all(recent[i] >= recent[i - 1] for i in range(1, len(recent))):
+            return "improving"
+        else:
+            avg_change = sum(recent[i] - recent[i - 1] for i in range(1, len(recent))) / (len(recent) - 1)
+            if avg_change > 5:
+                return "improving"
+            elif avg_change < -5:
+                return "declining"
+            return "stable"
+
+
+# ── Singleton — unchanged ──
 adaptive_engine = AdaptiveEngine()
