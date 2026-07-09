@@ -408,6 +408,35 @@ export interface AssessmentSession {
   }
 }
 
+export interface CsrComponents {
+  performance: number
+  attention: number
+  integrity: number
+  trend: number
+  complexity: number
+}
+
+export interface CsrBlock {
+  score: number
+  scorePct: number
+  components: CsrComponents
+  weightsUsed: Record<string, number>
+  explanation: string
+}
+
+export interface CsrHistoryEntry {
+  timestamp: number
+  assessmentId: string | null
+  performance: number
+  attention: number
+  integrity: number
+  trend: number
+  complexity: number
+  csr: number
+  difficulty: "easy" | "medium" | "hard"
+  explanation: string
+}
+
 export interface AssessmentResult {
   sessionId: string
   score: number
@@ -428,6 +457,10 @@ export interface AssessmentResult {
     nextAssessmentDifficulty: "easy" | "medium" | "hard"
     strengthAreas: string[]
     weakAreas: string[]
+    // Phase 11/13 addition (NeuroLearn-MCL): present once the backend has
+    // CSR_CONFIG.csr_enabled=True (the default). Optional so older cached
+    // results / the legacy-engine fallback path don't break existing UI.
+    csr?: CsrBlock
   }
 }
 
@@ -530,6 +563,26 @@ export async function submitAssessment(
 
       const msg = pct >= 90 ? "Outstanding! You've mastered this." : pct >= 70 ? "Well done! Solid understanding." : pct >= 50 ? "Decent effort. Review weak areas." : "Keep practicing! Rewatch the video."
 
+      // Dummy CSR (NeuroLearn-MCL): mirrors the backend's CSR shape so
+      // CSRPanel/CSRTrendWidget render identically whether the backend is
+      // reachable or not — same dual-fallback philosophy as every other
+      // function in this file, not a separate code path to maintain.
+      const timeRatio = timeSpent / 420 // matches the medium-difficulty default in generateAssessment's fallback; submitAssessment isn't passed the actual session time_limit
+      const integrityDummy = timeRatio < 0.15 || timeRatio > 1 ? 0.15 : timeRatio < 0.45 || timeRatio > 0.85 ? 0.6 : 1.0
+      const csrComponents: CsrComponents = {
+        performance: pct / 100,
+        attention: 0.7,
+        integrity: integrityDummy,
+        trend: trend === "improving" ? 0.75 : trend === "declining" ? 0.25 : 0.5,
+        complexity: 0.5,
+      }
+      const csrScore =
+        0.2 * csrComponents.performance +
+        0.2 * csrComponents.attention +
+        0.2 * csrComponents.integrity +
+        0.2 * csrComponents.trend +
+        0.2 * csrComponents.complexity
+
       return {
         sessionId,
         score: pct,
@@ -550,10 +603,72 @@ export async function submitAssessment(
           nextAssessmentDifficulty: nextDiff,
           strengthAreas: correct >= 3 ? ["Core Concepts", "Syntax"] : ["Basic Recognition"],
           weakAreas: correct < 3 ? ["Applied Knowledge", "Deep Understanding"] : [],
+          csr: {
+            score: csrScore,
+            scorePct: Math.round(csrScore * 1000) / 10,
+            components: csrComponents,
+            weightsUsed: { alpha: 0.2, beta: 0.2, gamma: 0.2, delta: 0.2, epsilon: 0.2 },
+            explanation: "Offline estimate — backend unreachable, showing locally-computed CSR.",
+          },
         },
       }
     }
   )
+}
+
+// ============================================================
+// COGNITIVE READINESS SCORE (CSR) — NeuroLearn-MCL, Phase 13
+// ============================================================
+
+function dummyCsrHistory(studentId: string): CsrHistoryEntry[] {
+  // Plausible, clearly-offline-looking demo history — same purpose as the
+  // other DUMMY_* fixtures in dummyDb.ts: lets every CSR-aware component
+  // render meaningfully with no backend running at all.
+  const now = Date.now() / 1000
+  const base = [0.42, 0.51, 0.58, 0.63, 0.7]
+  return base.map((csr, i) => ({
+    timestamp: now - (base.length - i) * 86400,
+    assessmentId: `demo_session_${i}`,
+    performance: Math.min(1, csr + 0.05),
+    attention: 0.7,
+    integrity: i === 1 ? 0.4 : 0.9, // one dip, so the trend widget shows it's a real signal, not a flat line
+    trend: csr,
+    complexity: 0.5,
+    csr,
+    difficulty: csr > 0.75 ? "hard" : csr >= 0.45 ? "medium" : "easy",
+    explanation: "Offline demo history — backend unreachable.",
+  }))
+}
+
+/** GET /api/csr/{student_id} */
+export async function fetchCurrentCsr(
+  studentId: string = "student_001"
+): Promise<CsrHistoryEntry | null> {
+  return apiFetch<CsrHistoryEntry | null>(
+    `/csr/${studentId}`,
+    { method: "GET" },
+    async () => {
+      await delay(150)
+      const history = dummyCsrHistory(studentId)
+      return history[history.length - 1] ?? null
+    }
+  )
+}
+
+/** GET /api/csr/{student_id}/history */
+export async function fetchCsrHistory(
+  studentId: string = "student_001",
+  limit?: number
+): Promise<CsrHistoryEntry[]> {
+  const query = limit ? `?limit=${limit}` : ""
+  return apiFetch<{ history: CsrHistoryEntry[] }>(
+    `/csr/${studentId}/history${query}`,
+    { method: "GET" },
+    async () => {
+      await delay(200)
+      return { history: dummyCsrHistory(studentId) } as any
+    }
+  ).then((res: any) => res.history ?? res)
 }
 
 // ============================================================

@@ -17,6 +17,7 @@ import {
   AlertTriangle,
 } from "lucide-react"
 import type { AssessmentResult } from "@/lib/api"
+import CSRPanel from "./CSRPanel"
 
 interface ResultCardProps {
   result: AssessmentResult
@@ -255,6 +256,11 @@ export default function ResultCard({ result }: ResultCardProps) {
               </p>
             )}
           </motion.div>
+
+          {/* Cognitive Readiness Score — NeuroLearn-MCL (Phase 13) */}
+          {result.adaptiveResponse?.csr && (
+            <CSRPanel csr={result.adaptiveResponse.csr} />
+          )}
 
           {/* Suggested topics */}
           {result.suggestedTopics?.length > 0 && (

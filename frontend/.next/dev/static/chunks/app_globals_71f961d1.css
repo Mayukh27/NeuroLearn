@@ -687,6 +687,10 @@
     margin-left: calc(var(--spacing) * 2);
   }
 
+  .ml-auto {
+    margin-left: auto;
+  }
+
   .line-clamp-2 {
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;
@@ -1120,6 +1124,12 @@
     --tw-space-y-reverse: 0;
     margin-block-start: calc(calc(var(--spacing) * 1) * var(--tw-space-y-reverse));
     margin-block-end: calc(calc(var(--spacing) * 1) * calc(1 - var(--tw-space-y-reverse)));
+  }
+
+  :where(.space-y-1\.5 > :not(:last-child)) {
+    --tw-space-y-reverse: 0;
+    margin-block-start: calc(calc(var(--spacing) * 1.5) * var(--tw-space-y-reverse));
+    margin-block-end: calc(calc(var(--spacing) * 1.5) * calc(1 - var(--tw-space-y-reverse)));
   }
 
   :where(.space-y-2 > :not(:last-child)) {
@@ -1959,20 +1969,6 @@
     --tw-gradient-stops: var(--tw-gradient-via-stops, var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-to) var(--tw-gradient-to-position));
   }
 
-  .from-violet-500\/5 {
-    --tw-gradient-from: #8d54ff0d;
-  }
-
-  @supports (color: color-mix(in lab, red, red)) {
-    .from-violet-500\/5 {
-      --tw-gradient-from: color-mix(in oklab, var(--color-violet-500) 5%, transparent);
-    }
-  }
-
-  .from-violet-500\/5 {
-    --tw-gradient-stops: var(--tw-gradient-via-stops, var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-to) var(--tw-gradient-to-position));
-  }
-
   .from-violet-500\/10 {
     --tw-gradient-from: #8d54ff1a;
   }
@@ -2349,10 +2345,6 @@
 
   .pb-3 {
     padding-bottom: calc(var(--spacing) * 3);
-  }
-
-  .pb-6 {
-    padding-bottom: calc(var(--spacing) * 6);
   }
 
   .pl-10 {
@@ -3070,18 +3062,6 @@
   @media (hover: hover) {
     .hover\:bg-violet-500:hover {
       background-color: var(--color-violet-500);
-    }
-  }
-
-  @media (hover: hover) {
-    .hover\:bg-violet-500\/5:hover {
-      background-color: #8d54ff0d;
-    }
-
-    @supports (color: color-mix(in lab, red, red)) {
-      .hover\:bg-violet-500\/5:hover {
-        background-color: color-mix(in oklab, var(--color-violet-500) 5%, transparent);
-      }
     }
   }
 

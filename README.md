@@ -12,6 +12,7 @@ AI-powered e-learning platform with real-time attention monitoring, live video t
 * AI transcription using Whisper
 * NLP-based question generation (FLAN-T5)
 * Adaptive assessment based on performance
+* **Cognitive Readiness Score (CSR)** — multimodal fusion of performance, attention, response integrity, learning trend, and content complexity (see [CSR & MCL-DE](#cognitive-readiness-score-csr--mcl-de))
 * Real-time attention tracking (MediaPipe)
 * FastAPI backend with modular architecture
 * Multi-source video support (YouTube, MP4, URLs)
@@ -132,7 +133,9 @@ neurolearn/
 │   ├── TranscriptionPanel.tsx    # Live transcript synced to video
 │   ├── VideoLinkSelector.tsx     # Course video picker
 │   ├── AssessmentCard.tsx        # Quiz question with MCQ selection
-│   └── ResultCard.tsx            # Score display + adaptive feedback
+│   ├── ResultCard.tsx            # Score display + adaptive feedback
+│   ├── CSRPanel.tsx              # Cognitive Readiness gauge + 5-component breakdown (results page)
+│   └── CSRTrendWidget.tsx        # CSR sparkline + current band (dashboard sidebar)
 │
 ├── lib/
 │   ├── api.ts                    # API layer (FastAPI → fallback → dummy)
@@ -141,20 +144,32 @@ neurolearn/
 │
 ├── backend/                      # FastAPI Python backend
 │   ├── main.py                   # Entry point
+│   ├── requirements.txt          # Python deps (merge-conflict fixed — see CHANGELOG below)
+│   ├── config/
+│   │   └── csr_config.py         # CSR weights, thresholds, all component sub-configs
 │   ├── schemas/models.py         # Pydantic JSON models
-│   ├── data/database.py          # TinyDB dummy database
+│   ├── data/database.py          # TinyDB database (+ csr_history table)
 │   ├── ml/
-│   │   ├── attention_model.py    # MediaPipe face mesh → attention score
-│   │   ├── transcription_model.py # Whisper → transcript segments
-│   │   ├── question_generator.py # FLAN-T5 → quiz questions
-│   │   └── adaptive_engine.py    # Score+attention → difficulty
-│   └── routers/
-│       ├── student.py            # Profile, XP
-│       ├── courses.py            # Course listing, videos
-│       ├── attention.py          # Camera frame → score
-│       ├── transcription.py      # Video → transcript
-│       ├── assessment.py         # Quiz generate + submit
-│       └── gamification.py       # Leaderboard, challenges
+│   │   ├── attention_model.py    # MediaPipe face mesh → attention score (unchanged)
+│   │   ├── transcription_model.py # Whisper → transcript segments (unchanged)
+│   │   ├── question_generator.py # FLAN-T5 → quiz questions (unchanged)
+│   │   ├── adaptive_engine.py    # CSR-driven difficulty selection (legacy rule cascade kept behind a config flag)
+│   │   ├── csr.py                # Cognitive Readiness Score — fuses the 5 components below
+│   │   ├── performance.py        # P — recency-weighted rolling average
+│   │   ├── attention_subscores.py# A — sub-score views over attention_model (no duplication of fusion logic)
+│   │   ├── response_integrity.py # I — timing-curve integrity, independent of correctness
+│   │   ├── trend.py               # T — regression-slope learning trend
+│   │   └── content_complexity.py # C — readability + technical-density transcript complexity
+│   ├── routers/
+│   │   ├── student.py            # Profile, XP
+│   │   ├── courses.py            # Course listing, videos
+│   │   ├── attention.py          # Camera frame → score
+│   │   ├── transcription.py      # Video → transcript
+│   │   ├── assessment.py         # Quiz generate + submit (now persists full CSR records)
+│   │   ├── gamification.py       # Leaderboard, challenges
+│   │   └── csr.py                # CSR + per-component history read endpoints
+│   └── tests/
+│       └── test_csr.py           # Unit tests for CSR and all 5 components (21 tests)
 │
 ├── package.json
 ├── tsconfig.json
@@ -166,7 +181,78 @@ neurolearn/
 
 ---
 
-## Data Flow: Frontend ↔ Backend
+## Cognitive Readiness Score (CSR) & MCL-DE
+
+NeuroLearn's adaptive difficulty selection is driven by the **Cognitive Readiness Score (CSR)**,
+a weighted fusion of five components, computed fresh for every assessment:
+
+```
+CSR = α·P + β·A + γ·I + δ·T + ε·C        (all terms in [0,1]; α=β=γ=δ=ε=0.20 by default)
+```
+
+| Symbol | Component | What it measures | Module |
+|---|---|---|---|
+| **P** | Performance | Recency-weighted rolling average of recent assessment scores | `ml/performance.py` |
+| **A** | Attention | Webcam-derived gaze / head-pose / blink-normality fusion (reuses `attention_model.py` unchanged) | `ml/attention_subscores.py` |
+| **I** | Response Integrity | Triangular timing curve — penalizes both very-fast *and* very-slow responses, **independent of correctness** (a fast *correct* guess is still flagged) | `ml/response_integrity.py` |
+| **T** | Learning Trend | Linear-regression slope over recent scores, saturated to [-1,1] and rescaled via `(T+1)/2` | `ml/trend.py` |
+| **C** | Content Complexity | Flesch Reading Ease + technical-term density + sentence length, computed from the transcript the student actually watched | `ml/content_complexity.py` |
+
+`ml/csr.py` fuses all five into one `CSRResult` (score, per-component breakdown, difficulty tier,
+human-readable explanation). **MCL-DE** (the Multimodal Closed-Loop Difficulty Engine) is this
+fusion plugged into `ml/adaptive_engine.py`: every assessment submission re-computes CSR from the
+student's latest behavior and selects the next difficulty from configurable thresholds:
+
+```
+CSR > 0.75        → hard
+0.45 ≤ CSR ≤ 0.75 → medium
+CSR < 0.45        → easy
+```
+
+The loop closes because each submission's CSR (and its five components) is persisted to a
+dedicated `csr_history` table and read back as `previous_scores`/trend input on the *next*
+submission — see **Database Schema** and **API Endpoints** below.
+
+### Configuration
+
+Every weight, threshold, and window size lives in `backend/config/csr_config.py`
+(`CSRWeights`, `DifficultyThresholds`, `PerformanceConfig`, `IntegrityConfig`, `TrendConfig`,
+`ComplexityConfig`, `LegacyEngineConfig`) — nothing is hardcoded in the component modules.
+`CSRConfig.csr_enabled` (default `True`) is a feature flag: setting it to `False` switches
+`adaptive_engine.py` back to its original rule-cascade logic, preserved (not deleted) for A/B
+comparison between the two engines.
+
+### Database Schema — `csr_history` table
+
+One TinyDB record per assessment submission:
+
+```json
+{
+  "student_id": "student_001",
+  "assessment_id": "session_1719... ",
+  "timestamp": 1719999999.0,
+  "performance": 0.82, "attention": 0.74, "integrity": 1.0,
+  "trend": 0.61, "complexity": 0.55,
+  "csr": 0.744, "difficulty": "medium",
+  "explanation": "CSR = 0.20*P(0.82) + 0.20*A(0.74) + ... = 0.744 -> 'medium'. ..."
+}
+```
+
+`get_recent_scores_pct()` reads the durable `results_table` (not an in-memory dict), so
+Performance and Trend survive a server restart.
+
+### Testing
+
+```bash
+cd backend
+pip install -r requirements.txt   # merge-conflict markers removed — installs cleanly now
+pytest tests/test_csr.py -v       # 21 tests: all 5 components + end-to-end CSR fusion
+```
+
+Notably includes a direct regression test for fast-but-*correct* answers being penalized by the
+Integrity component — the scenario a pure accuracy-gated rule structurally cannot catch.
+
+---
 
 ### Video Learning Session
 
@@ -199,17 +285,22 @@ Student clicks "Take Assessment"
 3. Student answers 5 questions (timer running)
 4. Frontend sends → POST /api/assessment/submit
    Body: { session_id, answers: { q1: 1, q2: 0 }, time_spent: 180 }
-   Backend: Grade → Adaptive Engine → XP calculation
+   Backend: Grade → CSR/MCL-DE (Performance+Attention+Integrity+Trend+Complexity) → XP calculation
    Returns: {
      score: 80%, xp_earned: 120,
      adaptive_response: {
        performance_trend: "improving",
        next_assessment_difficulty: "hard",
        strength_areas: ["Core Concepts"],
-       weak_areas: ["Applied Knowledge"]
+       weak_areas: ["Applied Knowledge"],
+       csr: {
+         score: 0.78, score_pct: 78.0,
+         components: { performance: 0.8, attention: 0.74, integrity: 1.0, trend: 0.61, complexity: 0.55 },
+         explanation: "CSR = 0.20*P(0.80) + ... = 0.78 -> 'hard'. ..."
+       }
      }
    }
-5. Navigate to /results → shows score, XP, feedback, next steps
+5. Navigate to /results → shows score, XP, feedback, next steps, and the CSR gauge/breakdown
 ```
 
 ---
@@ -234,7 +325,15 @@ Student clicks "Take Assessment"
 | GET | `/api/transcription/{id}/live` | Segment at timestamp |
 | POST | `/api/transcription/chunk` | Transcribe audio chunk |
 | **POST** | **`/api/assessment/generate`** | **Generate adaptive quiz** |
-| **POST** | **`/api/assessment/submit`** | **Submit answers → get adaptive result** |
+| **POST** | **`/api/assessment/submit`** | **Submit answers → get adaptive result (now includes CSR breakdown)** |
+| GET | `/api/csr/{student_id}` | Most recent Cognitive Readiness Score record |
+| GET | `/api/csr/{student_id}/history` | Full CSR history (every component + fused score) |
+| GET | `/api/csr/{student_id}/performance/history` | Performance (P) time series |
+| GET | `/api/csr/{student_id}/attention/history` | Attention (A) time series |
+| GET | `/api/csr/{student_id}/integrity/history` | Response Integrity (I) time series |
+| GET | `/api/csr/{student_id}/trend/history` | Learning Trend (T) time series |
+| GET | `/api/csr/{student_id}/complexity/history` | Content Complexity (C) time series |
+| GET | `/api/csr/{student_id}/difficulty/reason` | Latest adaptive explanation string |
 | GET | `/api/leaderboard` | Global rankings |
 | GET | `/api/challenges/daily` | Daily challenges |
 | GET | `/api/notifications` | Student notifications |
@@ -281,6 +380,12 @@ DB_PATH=./data/neurolearn_db.json
 | DB_PATH | ./data/neurolearn_db.json |
 | PYTHONUNBUFFERED | 1 |
 
+CSR weights/thresholds (`backend/config/csr_config.py`) are code-level config, not
+environment variables, by design — see **Configuration** under
+[CSR & MCL-DE](#cognitive-readiness-score-csr--mcl-de). No new env vars are required for CSR
+itself; `requirements-render.txt` is unchanged by this work and already installs cleanly
+(it never had the merge-conflict issue `requirements.txt` had).
+
 5. Deploy and copy your backend URL, for example:
    - `https://neurolearn-backend.onrender.com`
 
@@ -310,8 +415,9 @@ Then redeploy Render once.
 ### Notes
 
 - Render should use `requirements-render.txt` for reliable builds on free/starter tiers.
-- Full ML dependencies are still available in `backend/requirements.txt` for local/full environments.
+- Full ML dependencies are still available in `backend/requirements.txt` for local/full environments — this file's prior merge-conflict markers (CR4) are fixed; `pip install -r requirements.txt` now completes cleanly.
 - Health endpoint for Render checks: `/health`
+- **CSR history persistence**: `csr_history` is a TinyDB table backed by the same `DB_PATH` JSON file as every other table. On Render's free tier the filesystem is ephemeral across deploys/restarts — CSR history (and all other TinyDB data) will reset unless `DB_PATH` points at a persistent disk/volume. This is a pre-existing characteristic of the database choice, not something introduced by CSR.
 
 ---
 
@@ -335,11 +441,41 @@ Use the "Play Custom URL" button on the video page to paste any URL.
 
 **Backend:** FastAPI, Pydantic, TinyDB, Loguru
 
-**ML Models:** MediaPipe (attention), Faster Whisper (transcription), FLAN-T5 (questions), Custom adaptive engine
+**ML Models:** MediaPipe (attention), Faster Whisper (transcription), FLAN-T5 (questions)
+
+**Adaptive Engine:** Cognitive Readiness Score (CSR) / MCL-DE — fuses Performance, Attention, Response Integrity, Learning Trend, and Content Complexity into difficulty selection (legacy rule-cascade engine retained behind a config flag)
 
 ---
 
-## Pages
+## Testing
+
+```bash
+cd backend
+pip install -r requirements.txt
+pip install pytest pytest-asyncio httpx --break-system-packages   # test-only deps
+
+# Unit tests — CSR and all 5 components (21 tests)
+pytest tests/test_csr.py -v
+
+# API / integration tests — full HTTP layer via FastAPI's TestClient
+pytest tests/test_csr_api.py -v
+
+# Everything
+pytest tests/ -v
+```
+
+`tests/test_csr.py` covers each component module in isolation (Performance, Attention
+sub-scores, Response Integrity, Trend, Content Complexity) plus end-to-end CSR fusion,
+including a direct regression test asserting that a fast-but-*correct* response is still
+penalized by the Integrity component.
+
+`tests/test_csr_api.py` (new — see **API & Integration Tests** below) drives the actual
+FastAPI app through `TestClient`: generate → submit → read back via every `/api/csr/...`
+endpoint, confirming the full Phase 12 closed loop (assessment → CSR computation →
+persistence → history retrieval) works over real HTTP requests, not just direct function
+calls.
+
+---
 
 | Route | Page | Description |
 |-------|------|-------------|

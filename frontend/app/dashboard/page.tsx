@@ -3,13 +3,16 @@
 import { useEffect, useState } from "react"
 import { motion } from "framer-motion"
 import TopicCard from "@/components/TopicCard"
+import CSRTrendWidget from "@/components/CSRTrendWidget"
 import {
   fetchCourses,
   fetchStudentProfile,
   fetchDailyChallenges,
+  fetchCsrHistory,
   type Course,
   type StudentProfile,
   type DailyChallenge,
+  type CsrHistoryEntry,
 } from "@/lib/api"
 import { Trophy, Target, Flame, Clock, BookOpen, Zap, CheckCircle2, Circle } from "lucide-react"
 
@@ -19,6 +22,7 @@ export default function DashboardPage() {
   const [courses, setCourses] = useState<Course[]>([])
   const [student, setStudent] = useState<StudentProfile | null>(null)
   const [challenges, setChallenges] = useState<DailyChallenge[]>([])
+  const [csrHistory, setCsrHistory] = useState<CsrHistoryEntry[]>([])
   const [isLoading, setIsLoading] = useState(true)
 
   function getLocallySavedCourses(): Course[] {
@@ -33,8 +37,13 @@ export default function DashboardPage() {
   }
 
   useEffect(() => {
-    Promise.all([fetchCourses(), fetchStudentProfile(), fetchDailyChallenges()])
-      .then(([c, s, ch]) => {
+    Promise.all([
+      fetchCourses(),
+      fetchStudentProfile(),
+      fetchDailyChallenges(),
+      fetchCsrHistory("student_001", 10).catch(() => []), // isolated: no CSR history yet shouldn't block the dashboard
+    ])
+      .then(([c, s, ch, csr]) => {
         const localSaved = getLocallySavedCourses()
         const merged = [...c]
         for (const localCourse of localSaved) {
@@ -46,6 +55,7 @@ export default function DashboardPage() {
         setCourses(merged)
         setStudent(s)
         setChallenges(ch)
+        setCsrHistory(csr)
       })
       .finally(() => setIsLoading(false))
   }, [])
@@ -113,6 +123,9 @@ export default function DashboardPage() {
 
         {/* Right Sidebar */}
         <div className="space-y-5">
+          {/* Cognitive Readiness — NeuroLearn-MCL (Phase 13) */}
+          <CSRTrendWidget history={csrHistory} />
+
           {/* Daily Challenges */}
           <motion.div
             initial={{ opacity: 0, x: 20 }}
