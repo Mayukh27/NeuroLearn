@@ -85,6 +85,8 @@ class Course(BaseModel):
 class AttentionModelOutput(BaseModel):
     """Raw JSON output from the attention detection ML model"""
     eye_contact: float = Field(ge=0, le=1)
+    eye_open: Optional[float] = Field(default=None, ge=0, le=1)
+    eyes_closed_duration: Optional[float] = Field(default=None, ge=0)
     head_pose: Literal["forward", "slightly_away", "away"]
     face_detected: bool
     blink_rate: float

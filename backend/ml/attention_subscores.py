@@ -21,7 +21,7 @@ attention_model.analyze_frame() currently returns:
         ...
     }
 
-The fusion weights below (gaze 0.40 / head 0.35 / blink-normality 0.25)
+The fusion weights below (gaze 0.25 / head 0.65 / blink-normality 0.10)
 intentionally MIRROR the constants already hardcoded inside
 AttentionDetector.analyze_frame() — they are duplicated here only so this
 module's sub-scores stay internally consistent with the score that already
@@ -38,7 +38,7 @@ from typing import Dict
 
 
 # Mirrors AttentionDetector's internal head_pose -> score mapping.
-_HEAD_POSE_SCORE = {"forward": 1.0, "slightly_away": 0.5, "away": 0.1}
+_HEAD_POSE_SCORE = {"forward": 1.0, "slightly_away": 0.65, "away": 0.2}
 _IDEAL_BLINK_RATE = 17.0  # blinks/min, mirrors AttentionDetector
 _BLINK_TOLERANCE = 15.0
 
@@ -71,9 +71,13 @@ def derive_subscores(attention_snapshot: Dict) -> AttentionSubscores:
     """
     model_response = attention_snapshot.get("model_response", {})
 
-    gaze_score = float(model_response.get("eye_contact", 0.5))
     head_pose_label = model_response.get("head_pose", "forward")
     head_pose_score = _HEAD_POSE_SCORE.get(head_pose_label, 0.5)
+    gaze_score = float(model_response.get("eye_contact", 0.5))
+    if head_pose_label == "forward":
+        gaze_score = max(gaze_score, 0.65)
+    elif head_pose_label == "slightly_away":
+        gaze_score = max(gaze_score, 0.35)
 
     blink_rate = float(model_response.get("blink_rate", _IDEAL_BLINK_RATE))
     blink_score = 1.0 - min(1.0, abs(blink_rate - _IDEAL_BLINK_RATE) / _BLINK_TOLERANCE)

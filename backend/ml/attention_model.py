@@ -63,6 +63,7 @@ class AttentionDetector:
         self.frame_count = 0
         self._attention_started_at: Optional[float] = None
         self._last_analysis_at: Optional[float] = None
+        self._eyes_closed_since: Optional[float] = None
         self._smoothed_score: Optional[float] = None
         self._prev_ear = 0.3
         self._blink_threshold = 0.21
@@ -216,6 +217,7 @@ class AttentionDetector:
         if self._last_analysis_at is not None and now - self._last_analysis_at > 10:
             self.blink_timestamps = []
             self._attention_started_at = None
+            self._eyes_closed_since = None
             self._smoothed_score = None
         self._last_analysis_at = now
 
@@ -259,6 +261,22 @@ class AttentionDetector:
         # ── Aggregate attention score ──
         # Head pose is steadier than iris tracking on low-resolution webcam frames.
         head_score = {"forward": 1.0, "slightly_away": 0.65, "away": 0.2}[head_pose]
+        eye_open_score = max(
+            0.0,
+            min(1.0, (avg_ear - self._blink_threshold) / (0.28 - self._blink_threshold)),
+        )
+        eyes_closed_duration = 0.0
+        if eye_open_score <= 0.2:
+            if self._eyes_closed_since is None:
+                self._eyes_closed_since = now
+            eyes_closed_duration = now - self._eyes_closed_since
+        else:
+            self._eyes_closed_since = None
+        calibrated_gaze_score = gaze_score
+        if eye_open_score > 0.2 and head_pose == "forward":
+            calibrated_gaze_score = max(calibrated_gaze_score, 0.65)
+        elif eye_open_score > 0.2 and head_pose == "slightly_away":
+            calibrated_gaze_score = max(calibrated_gaze_score, 0.35)
 
         # Normal blink rate: 15-20/min. Too low = staring/distracted, too high = tired
         monitoring_seconds = now - self._attention_started_at
@@ -267,13 +285,32 @@ class AttentionDetector:
         else:
             blink_normal = 1.0 - min(1.0, abs(blink_rate - 17) / 15)
 
-        raw_score = (gaze_score * 0.35 + head_score * 0.45 + blink_normal * 0.20) * 100
+        raw_score = (
+            calibrated_gaze_score * 0.20
+            + head_score * 0.45
+            + eye_open_score * 0.30
+            + blink_normal * 0.05
+        ) * 100
         if self._smoothed_score is None:
+            self._smoothed_score = raw_score
+        elif eyes_closed_duration >= 2.0 or head_pose == "away":
             self._smoothed_score = raw_score
         else:
             self._smoothed_score = (self._smoothed_score * 0.65) + (raw_score * 0.35)
 
         score = int(max(0, min(100, self._smoothed_score)))
+        if eyes_closed_duration >= 6.0:
+            score = min(score, 5)
+        elif eyes_closed_duration >= 4.0:
+            score = min(score, 15)
+        elif eyes_closed_duration >= 2.0:
+            score = min(score, 25)
+        elif eye_open_score <= 0.2:
+            score = min(score, 60)
+        elif head_pose == "away":
+            score = min(score, 25)
+        elif head_pose == "slightly_away":
+            score = min(score, 60)
 
         # ── Classify state ──
         if score >= self.ATTENTIVE_THRESHOLD:
@@ -296,6 +333,8 @@ class AttentionDetector:
             "message": message,
             "model_response": {
                 "eye_contact": round(gaze_score, 3),
+                "eye_open": round(eye_open_score, 3),
+                "eyes_closed_duration": round(eyes_closed_duration, 1),
                 "head_pose": head_pose,
                 "face_detected": True,
                 "blink_rate": round(blink_rate, 1),
@@ -312,6 +351,7 @@ class AttentionDetector:
             "message": "No face detected. Please ensure your camera can see your face.",
             "model_response": {
                 "eye_contact": 0.0,
+                "eye_open": 0.0,
                 "head_pose": "away",
                 "face_detected": False,
                 "blink_rate": 0.0,
@@ -344,6 +384,7 @@ class AttentionDetector:
             "message": random.choice(self.MESSAGES[state]),
             "model_response": {
                 "eye_contact": round(score / 100 * random.uniform(0.8, 1.0), 3),
+                "eye_open": round(random.uniform(0.8, 1.0), 3),
                 "head_pose": head_poses[state],
                 "face_detected": random.random() > 0.05,
                 "blink_rate": round(random.uniform(10, 22), 1),
