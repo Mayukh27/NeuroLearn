@@ -32,7 +32,7 @@ class AttentionDetector:
 
     # Attention thresholds
     ATTENTIVE_THRESHOLD = 65
-    INATTENTIVE_THRESHOLD = 35
+    INATTENTIVE_THRESHOLD = 30
 
     # Messages for each state
     MESSAGES = {
@@ -61,6 +61,9 @@ class AttentionDetector:
         self.blink_counter = 0
         self.blink_timestamps: list[float] = []
         self.frame_count = 0
+        self._attention_started_at: Optional[float] = None
+        self._last_analysis_at: Optional[float] = None
+        self._smoothed_score: Optional[float] = None
         self._prev_ear = 0.3
         self._blink_threshold = 0.21
 
@@ -135,7 +138,8 @@ class AttentionDetector:
             def iris_ratio(iris, inner, outer):
                 total = abs(outer.x - inner.x) + 1e-6
                 pos = abs(iris.x - inner.x)
-                return 1.0 - abs(0.5 - (pos / total)) * 2  # 1.0 = centered
+                score = 1.0 - abs(0.5 - (pos / total)) * 2  # 1.0 = centered
+                return max(0.0, min(1.0, score))
 
             left_score = iris_ratio(left_iris, left_inner, left_outer)
             right_score = iris_ratio(right_iris, right_inner, right_outer)
@@ -146,12 +150,13 @@ class AttentionDetector:
             vert_range = abs(left_eye_top.y - left_eye_bottom.y) + 1e-6
             vert_pos = abs(left_iris.y - left_eye_top.y) / vert_range
             vert_score = 1.0 - abs(0.5 - vert_pos) * 2
+            vert_score = max(0.0, min(1.0, vert_score))
 
             gaze = (left_score + right_score + vert_score) / 3.0
             return max(0.0, min(1.0, gaze))
 
         except (IndexError, AttributeError):
-            return 0.5  # Default if landmarks unavailable
+            return 0.65  # Default if iris landmarks are unavailable
 
     def _compute_head_pose(self, landmarks, w: int, h: int) -> str:
         """
@@ -207,6 +212,12 @@ class AttentionDetector:
         """
         self.frame_count += 1
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        now = time.time()
+        if self._last_analysis_at is not None and now - self._last_analysis_at > 10:
+            self.blink_timestamps = []
+            self._attention_started_at = None
+            self._smoothed_score = None
+        self._last_analysis_at = now
 
         # ── If ML not available, return dummy ──
         if not ML_AVAILABLE or self.face_mesh is None:
@@ -227,6 +238,8 @@ class AttentionDetector:
             return self._no_face_snapshot(timestamp)
 
         landmarks = results.multi_face_landmarks[0].landmark
+        if self._attention_started_at is None:
+            self._attention_started_at = now
 
         # ── Compute metrics ──
         # 1. Eye Aspect Ratio (for blink detection)
@@ -244,14 +257,23 @@ class AttentionDetector:
         head_pose = self._compute_head_pose(landmarks, w, h)
 
         # ── Aggregate attention score ──
-        # Weights: gaze 40%, head pose 35%, blink normality 25%
-        head_score = {"forward": 1.0, "slightly_away": 0.5, "away": 0.1}[head_pose]
+        # Head pose is steadier than iris tracking on low-resolution webcam frames.
+        head_score = {"forward": 1.0, "slightly_away": 0.65, "away": 0.2}[head_pose]
 
         # Normal blink rate: 15-20/min. Too low = staring/distracted, too high = tired
-        blink_normal = 1.0 - min(1.0, abs(blink_rate - 17) / 15)
+        monitoring_seconds = now - self._attention_started_at
+        if monitoring_seconds < 20 and blink_rate == 0:
+            blink_normal = 0.85
+        else:
+            blink_normal = 1.0 - min(1.0, abs(blink_rate - 17) / 15)
 
-        raw_score = (gaze_score * 0.40 + head_score * 0.35 + blink_normal * 0.25) * 100
-        score = int(max(0, min(100, raw_score)))
+        raw_score = (gaze_score * 0.35 + head_score * 0.45 + blink_normal * 0.20) * 100
+        if self._smoothed_score is None:
+            self._smoothed_score = raw_score
+        else:
+            self._smoothed_score = (self._smoothed_score * 0.65) + (raw_score * 0.35)
+
+        score = int(max(0, min(100, self._smoothed_score)))
 
         # ── Classify state ──
         if score >= self.ATTENTIVE_THRESHOLD:
@@ -308,7 +330,7 @@ class AttentionDetector:
         else:
             state = "attentive"
 
-        ranges = {"attentive": (70, 100), "inattentive": (35, 69), "unfocused": (0, 34)}
+        ranges = {"attentive": (70, 100), "inattentive": (30, 69), "unfocused": (0, 29)}
         lo, hi = ranges[state]
         score = random.randint(lo, hi)
 

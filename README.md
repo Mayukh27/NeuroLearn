@@ -360,66 +360,6 @@ DB_PATH=./data/neurolearn_db.json
 
 ---
 
-## Deployment (Vercel + Render)
-
-### 1. Deploy Backend to Render
-
-1. Create a new **Web Service** on Render from this repository.
-2. Set **Root Directory** to `backend`.
-3. Use these commands:
-   - Build Command: `pip install -r requirements-render.txt`
-   - Start Command: `python -m uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1`
-4. Add environment variables in Render:
-
-| Variable | Value |
-|----------|-------|
-| DEBUG | false |
-| CORS_ORIGINS | https://YOUR_VERCEL_DOMAIN.vercel.app,http://localhost:3000 |
-| WHISPER_MODEL_SIZE | base |
-| FLAN_T5_MODEL | google/flan-t5-base |
-| DB_PATH | ./data/neurolearn_db.json |
-| PYTHONUNBUFFERED | 1 |
-
-CSR weights/thresholds (`backend/config/csr_config.py`) are code-level config, not
-environment variables, by design — see **Configuration** under
-[CSR & MCL-DE](#cognitive-readiness-score-csr--mcl-de). No new env vars are required for CSR
-itself; `requirements-render.txt` is unchanged by this work and already installs cleanly
-(it never had the merge-conflict issue `requirements.txt` had).
-
-5. Deploy and copy your backend URL, for example:
-   - `https://neurolearn-backend.onrender.com`
-
-### 2. Deploy Frontend to Vercel
-
-1. Import this repository to Vercel (https://vercel.com/new).
-2. **In Vercel Project Settings → General**, set **Root Directory** to `frontend`.
-   - This is critical for the monorepo setup.
-3. In **Environment Variables**, add:
-   - `NEXT_PUBLIC_API_URL`: `https://YOUR_RENDER_BACKEND.onrender.com/api`
-4. Deploy.
-
-Vercel will automatically detect Next.js, install from `frontend/package.json`, and build.
-
-### 3. Final CORS Update
-
-After Vercel gives you the final URL, update Render `CORS_ORIGINS` to include it exactly.
-
-Example:
-
-```
-https://neurolearn-frontend.vercel.app,http://localhost:3000
-```
-
-Then redeploy Render once.
-
-### Notes
-
-- Render should use `requirements-render.txt` for reliable builds on free/starter tiers.
-- Full ML dependencies are still available in `backend/requirements.txt` for local/full environments — this file's prior merge-conflict markers (CR4) are fixed; `pip install -r requirements.txt` now completes cleanly.
-- Health endpoint for Render checks: `/health`
-- **CSR history persistence**: `csr_history` is a TinyDB table backed by the same `DB_PATH` JSON file as every other table. On Render's free tier the filesystem is ephemeral across deploys/restarts — CSR history (and all other TinyDB data) will reset unless `DB_PATH` points at a persistent disk/volume. This is a pre-existing characteristic of the database choice, not something introduced by CSR.
-
----
 
 ## Video URL Support
 
@@ -444,6 +384,31 @@ Use the "Play Custom URL" button on the video page to paste any URL.
 **ML Models:** MediaPipe (attention), Faster Whisper (transcription), FLAN-T5 (questions)
 
 **Adaptive Engine:** Cognitive Readiness Score (CSR) / MCL-DE — fuses Performance, Attention, Response Integrity, Learning Trend, and Content Complexity into difficulty selection (legacy rule-cascade engine retained behind a config flag)
+
+---
+## Quick Start (Full Stack — Frontend + FastAPI Backend)
+
+### Terminal 1: Backend
+```bash
+cd backend
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+pip install fastapi uvicorn tinydb loguru python-dotenv
+python main.py
+# → API running at http://localhost:8000
+# → Swagger docs at http://localhost:8000/docs
+```
+
+### Terminal 2: Frontend
+```bash
+npm install
+npm run dev
+# → Open http://localhost:3000
+```
+
+The frontend auto-detects whether the backend is running:
+- **Backend UP** → uses real FastAPI endpoints + ML models
+- **Backend DOWN** → falls back to local dummy data seamlessly
 
 ---
 

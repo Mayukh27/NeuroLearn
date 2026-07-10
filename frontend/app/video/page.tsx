@@ -150,8 +150,8 @@ function VideoContent() {
       scoreHistory: attentionHistory.slice(-40),
       totalSnapshots: attentionHistory.length,
       attentivePercent: Math.round((attentionHistory.filter(s => s >= 65).length / Math.max(attentionHistory.length, 1)) * 100),
-      inattentivePercent: Math.round((attentionHistory.filter(s => s >= 35 && s < 65).length / Math.max(attentionHistory.length, 1)) * 100),
-      unfocusedPercent: Math.round((attentionHistory.filter(s => s < 35).length / Math.max(attentionHistory.length, 1)) * 100),
+      inattentivePercent: Math.round((attentionHistory.filter(s => s >= 30 && s < 65).length / Math.max(attentionHistory.length, 1)) * 100),
+      unfocusedPercent: Math.round((attentionHistory.filter(s => s < 30).length / Math.max(attentionHistory.length, 1)) * 100),
       avgEyeContact: latestAttention?.modelResponse?.eyeContact ?? 0.8,
       avgBlinkRate: latestAttention?.modelResponse?.blinkRate ?? 16,
     }

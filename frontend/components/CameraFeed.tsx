@@ -65,7 +65,7 @@ function generateLocalDummy(): AttentionSnapshotResponse {
   const r = Math.random()
   const state: "attentive" | "inattentive" | "unfocused" =
     r > 0.85 ? "unfocused" : r > 0.6 ? "inattentive" : "attentive"
-  const ranges = { attentive: [70, 100], inattentive: [35, 69], unfocused: [0, 34] } as const
+  const ranges = { attentive: [70, 100], inattentive: [30, 69], unfocused: [0, 29] } as const
   const [lo, hi] = ranges[state]
   const score = Math.floor(Math.random() * (hi - lo + 1)) + lo
   const messages = {
@@ -374,7 +374,7 @@ export default function CameraFeed({
             {lastScore !== null && (
               <div className={`px-2 py-1 rounded-md backdrop-blur-sm text-[10px] font-bold font-mono ${
                 lastScore >= 70 ? "bg-emerald-500/30 text-emerald-300" :
-                lastScore >= 40 ? "bg-amber-500/30 text-amber-300" :
+                lastScore >= 30 ? "bg-amber-500/30 text-amber-300" :
                 "bg-red-500/30 text-red-300"
               }`}>
                 Score: {lastScore}

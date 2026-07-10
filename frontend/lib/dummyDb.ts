@@ -499,7 +499,7 @@ export function generateAttentionSnapshot(): AttentionSnapshot {
   if (rand > weights[0] + weights[1]) state = "unfocused"
   else if (rand > weights[0]) state = "inattentive"
 
-  const scoreRanges = { attentive: [70, 100], inattentive: [35, 69], unfocused: [0, 34] }
+  const scoreRanges = { attentive: [70, 100], inattentive: [30, 69], unfocused: [0, 29] }
   const [min, max] = scoreRanges[state]
   const score = Math.floor(Math.random() * (max - min + 1)) + min
 
