@@ -99,6 +99,16 @@ class AttentionSnapshot(BaseModel):
     confidence: float = Field(ge=0, le=1)
     message: str
     model_response: AttentionModelOutput
+    # FIX (MJ4, peer review packet): reader/caller-visible signal for
+    # whether this snapshot came from a live ML model or a dummy fallback,
+    # so reports and figures generated from these responses can be honestly
+    # labeled rather than silently mixing live and dummy output.
+    source: Literal["live", "dummy"] = "dummy"
+    # FIX (CR6, peer review packet): every stored snapshot carries the
+    # consent state it was captured under, so a later audit or data export
+    # can distinguish consented sessions from anything that shouldn't have
+    # been recorded.
+    consent_confirmed: bool = False
 
 
 class AttentionFrameRequest(BaseModel):
@@ -106,6 +116,35 @@ class AttentionFrameRequest(BaseModel):
     frame_base64: str
     video_id: str
     student_id: str
+    # FIX (CR6, peer review packet): the backend must not analyze or store
+    # a frame without an on-file consent grant for this student. The
+    # frontend gates camera start behind the consent modal (see
+    # ConsentModal.tsx) — this flag is a second, server-side check so
+    # consent can't be bypassed by calling the API directly.
+    consent_confirmed: bool = False
+
+
+# ── Consent (CR6 fix) ─────────────────────────────────────────
+
+class ConsentGrant(BaseModel):
+    """A student's response to the webcam-monitoring consent prompt."""
+    student_id: str
+    granted: bool
+    # What the student was told at the time of consent — kept alongside the
+    # grant so a later policy change doesn't retroactively reinterpret an
+    # old consent. Mirrors the retention/opt-out language in ConsentModal.
+    retention_days: int = 30
+    raw_frames_stored: bool = False  # NeuroLearn never persists raw images — only derived scores
+    version: str = "1.0"  # consent-copy version, bump if the disclosure text changes
+
+
+class ConsentStatus(BaseModel):
+    student_id: str
+    granted: bool
+    granted_at: Optional[str] = None
+    retention_days: int = 30
+    raw_frames_stored: bool = False
+    version: str = "1.0"
 
 
 # ── Transcription ───────────────────────────────────────────

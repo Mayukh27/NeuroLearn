@@ -215,7 +215,23 @@ class QuestionGenerator:
         difficulty_scores = {"easy": 0.2, "medium": 0.55, "hard": 0.8}
         points_map = {"easy": 10, "medium": 20, "hard": 30}
 
+        # FIX (MJ3, peer review packet): previously every question in the
+        # batch was generated from the exact same transcript_text[:1000]
+        # slice, so num_questions>1 meant num_questions prompts competing
+        # for one FLAN-T5-base call over identical context — a small part
+        # of why the review found generation quality "optimistic". This
+        # rotates through non-overlapping ~800-char segments so each
+        # question is grounded in a different part of what the student
+        # actually watched, and falls back to the full text only when the
+        # transcript is shorter than one segment.
+        segment_len = 800
+        segments = (
+            [transcript_text[i : i + segment_len] for i in range(0, len(transcript_text), segment_len)]
+            or [transcript_text]
+        )
+
         for i in range(num_questions):
+            segment = segments[i % len(segments)]
             # Construct prompt
             prompt = (
                 f"Generate a {difficulty} multiple choice question "
@@ -223,7 +239,7 @@ class QuestionGenerator:
                 f"Format: Question: [question]\\nA) [option1]\\nB) [option2]\\n"
                 f"C) [option3]\\nD) [option4]\\nCorrect: [A/B/C/D]\\n"
                 f"Explanation: [why]\\n\\n"
-                f"Text: {transcript_text[:1000]}"  # Truncate for context window
+                f"Text: {segment}"
             )
 
             # Tokenize
@@ -264,9 +280,20 @@ class QuestionGenerator:
                         "difficulty_score": difficulty_scores.get(difficulty, 0.5) + random.uniform(-0.1, 0.1),
                         "blooms_level": blooms,
                     },
+                    # FIX (MJ4, peer review packet): every question is now
+                    # tagged with where it actually came from, so an
+                    # assessment report can honestly state how many items
+                    # were live FLAN-T5 generations vs. fallback-bank
+                    # padding — see the "source" tally already surfaced by
+                    # ml/question_generator.py's caller.
+                    "source": "flan_t5_live",
                 })
 
-        # If FLAN didn't generate enough, pad with bank questions
+        # If FLAN didn't generate enough — or the parse failed validation —
+        # pad with bank questions. This padding is expected and disclosed
+        # (README "Dummy Mode" / reproducibility statement), not a silent
+        # substitution: each padded item is tagged accordingly by
+        # _generate_from_bank so downstream reports can report the mix.
         if len(questions) < num_questions:
             bank_fill = self._generate_from_bank(
                 difficulty, num_questions - len(questions), topic_id
@@ -314,7 +341,19 @@ class QuestionGenerator:
     def _generate_from_bank(
         self, difficulty: str, num_questions: int, topic_id: str
     ) -> list[dict]:
-        """Generate questions from the static question bank."""
+        """
+        Generate questions from the static question bank.
+
+        NOTE (MJ3, peer review packet): this bank is currently
+        React/web-dev-specific — using it for a non-React course topic is
+        a known, disclosed limitation (not fixed here, since a general
+        fix requires per-subject question banks or a working live-model
+        path for every topic). Every item returned is explicitly tagged
+        `source: "question_bank_fallback"` (see below and in
+        `_generate_with_flan`) precisely so this substitution is visible
+        in any report generated from assessment data, instead of being
+        indistinguishable from a live FLAN-T5 generation (MJ4).
+        """
         bank = self.QUESTION_BANK.get(difficulty, self.QUESTION_BANK["medium"])
         selected = random.sample(bank, min(num_questions, len(bank)))
 
@@ -339,6 +378,7 @@ class QuestionGenerator:
                     "difficulty_score": difficulty_scores.get(difficulty, 0.5),
                     "blooms_level": q.get("blooms_level", "understand"),
                 },
+                "source": "question_bank_fallback",
             })
 
         return questions

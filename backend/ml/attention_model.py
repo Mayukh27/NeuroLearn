@@ -339,6 +339,9 @@ class AttentionDetector:
                 "face_detected": True,
                 "blink_rate": round(blink_rate, 1),
             },
+            # FIX (MJ4, peer review packet): explicit, reader-visible tag —
+            # this snapshot came from the live MediaPipe pipeline.
+            "source": "live",
         }
 
     def _no_face_snapshot(self, timestamp: str) -> dict:
@@ -356,6 +359,9 @@ class AttentionDetector:
                 "face_detected": False,
                 "blink_rate": 0.0,
             },
+            # Still a live-pipeline result (MediaPipe ran, just found no face) —
+            # distinct from the dummy-mode fallback below.
+            "source": "live",
         }
 
     def _generate_dummy_snapshot(self, timestamp: str) -> dict:
@@ -389,6 +395,10 @@ class AttentionDetector:
                 "face_detected": random.random() > 0.05,
                 "blink_rate": round(random.uniform(10, 22), 1),
             },
+            # FIX (MJ4, peer review packet): explicit, reader-visible tag —
+            # MediaPipe/OpenCV weren't available, this is synthetic dummy
+            # output and must not be reported as a live-model result.
+            "source": "dummy",
         }
 
     def cleanup(self):

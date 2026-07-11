@@ -17,6 +17,7 @@
 import { useRef, useState, useEffect, useCallback } from "react"
 import { motion } from "framer-motion"
 import { Camera, CameraOff, AlertTriangle, Wifi, WifiOff } from "lucide-react"
+import ConsentModal from "./ConsentModal"
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api"
 const CAPTURE_INTERVAL_MS = 500 // capture frame every 500ms
@@ -119,6 +120,39 @@ export default function CameraFeed({
   const [framesSent, setFramesSent] = useState(0)
   const [lastScore, setLastScore] = useState<number | null>(null)
 
+  // FIX (CR6, peer review packet): consent must be resolved before the
+  // camera is ever requested. `consentGranted === null` means "not yet
+  // asked" (show the modal); `false` means the student opted out
+  // (CameraFeed stays permanently off for this session, no retries).
+  const [consentGranted, setConsentGranted] = useState<boolean | null>(null)
+  const [consentChecked, setConsentChecked] = useState(false)
+  const consentGrantedRef = useRef<boolean | null>(null)
+  consentGrantedRef.current = consentGranted
+
+  // On mount, check whether this student already has a consent decision
+  // on file (e.g. from a previous session) so we don't re-prompt every time.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/attention/consent?student_id=${encodeURIComponent(studentId)}`
+        )
+        if (!cancelled && res.ok) {
+          const data = await res.json()
+          setConsentGranted(data.granted === true ? true : data.granted === false && data.granted_at ? false : null)
+        }
+      } catch {
+        // Backend unreachable — fall through to prompting; declining is safe.
+      } finally {
+        if (!cancelled) setConsentChecked(true)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [studentId])
+
   // ══════════════════════════════════════════════════════════
   // STEP 1: Start webcam — getUserMedia → video.srcObject
   // ══════════════════════════════════════════════════════════
@@ -218,7 +252,12 @@ export default function CameraFeed({
       let delivered = false
 
       // ── Try real backend with 2s timeout ──
-      if (frame) {
+      // CR6: only send a frame if consent was actually granted — this loop
+      // only runs while isActive is true, and isActive can now only become
+      // true after handleConsentDecision(true) or a prior granted session,
+      // but we still check the ref directly as defense-in-depth against a
+      // stale closure.
+      if (frame && consentGrantedRef.current === true) {
         try {
           const ctrl = new AbortController()
           const timer = setTimeout(() => ctrl.abort(), 2000)
@@ -231,6 +270,7 @@ export default function CameraFeed({
               frame_base64: frame,
               video_id: videoIdRef.current,
               student_id: studentIdRef.current,
+              consent_confirmed: true,
             }),
           })
           clearTimeout(timer)
@@ -295,10 +335,20 @@ export default function CameraFeed({
     setIsConnected(false)
   }, [])
 
-  // Auto-start camera when video plays
+  // Auto-start camera when video plays — ONLY if the student has already
+  // granted consent (CR6). If consent is undecided, the modal below
+  // handles it and calls startCamera() itself via handleConsentDecision.
   useEffect(() => {
-    if (isVideoPlaying && !isActive && !error) startCamera()
-  }, [isVideoPlaying, isActive, error, startCamera])
+    if (isVideoPlaying && !isActive && !error && consentGranted === true) startCamera()
+  }, [isVideoPlaying, isActive, error, consentGranted, startCamera])
+
+  const handleConsentDecision = useCallback(
+    (granted: boolean) => {
+      setConsentGranted(granted)
+      if (granted && isVideoPlaying && !isActive && !error) startCamera()
+    },
+    [isVideoPlaying, isActive, error, startCamera]
+  )
 
   // Cleanup on unmount
   useEffect(() => () => stopCamera(), [stopCamera])
@@ -330,9 +380,27 @@ export default function CameraFeed({
         </div>
       </div>
 
+      {/* Consent gate (CR6) — shown once per undecided student, before any
+          getUserMedia call ever happens */}
+      {isVideoPlaying && consentChecked && consentGranted === null && (
+        <ConsentModal studentId={studentId} onDecision={handleConsentDecision} />
+      )}
+
       {/* Camera view */}
       <div className="relative aspect-video bg-[var(--bg-primary)] overflow-hidden">
-        {!isActive && !error && (
+        {consentGranted === false && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-4 text-center">
+            <div className="w-12 h-12 rounded-full bg-[var(--bg-elevated)] flex items-center justify-center">
+              <CameraOff size={20} className="text-[var(--text-muted)]" />
+            </div>
+            <p className="text-xs text-[var(--text-muted)]">
+              Camera monitoring is off by your choice. Your readiness score uses a
+              neutral attention value instead — this does not lower your score.
+            </p>
+          </div>
+        )}
+
+        {consentGranted !== false && !isActive && !error && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
             <div className="w-12 h-12 rounded-full bg-[var(--bg-elevated)] flex items-center justify-center">
               <CameraOff size={20} className="text-[var(--text-muted)]" />

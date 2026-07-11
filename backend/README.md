@@ -98,7 +98,48 @@ This means the frontend can be developed and tested without:
 
 The API returns realistic dummy JSON in the exact same format.
 
+## Reproducibility Statement (live vs. dummy)
+
+**FIX (MJ4, peer review packet):** dummy-mode output is realistic enough
+to be visually indistinguishable from live-model output in a screenshot
+or a report figure — the peer review packet flagged this as a risk that
+demo materials could be silently dummy-driven with no reader-visible
+signal. Every ML response now carries an explicit `"source"` field:
+
+| Endpoint | `source` values |
+|---|---|
+| `POST /api/attention/snapshot` | `"live"` (MediaPipe ran, including the no-face case) or `"dummy"` (MediaPipe/OpenCV unavailable) |
+| `POST /api/assessment/generate` (per question) | `"flan_t5_live"` or `"question_bank_fallback"` |
+| `POST /api/transcription/chunk` | inherits Whisper's own availability flag — see `ml/transcription_model.py` |
+
+Any report or figure generated from stored data (including
+`NeuroLearn_ML_Metrics_Report.docx`) should be built by filtering on this
+field, and should state the live/dummy mix explicitly rather than
+presenting all samples as equivalent. Check `GET /health` for which
+models were loaded at server start.
+
+## Consent & Data Retention (attention monitoring)
+
+**FIX (CR6, peer review packet):** `/api/attention/snapshot` is
+consent-gated. A student must have an on-file `granted=true` record
+(`POST /api/attention/consent`) before any frame is analyzed, and the
+request itself must carry `consent_confirmed=true`. Declining does not
+penalize CSR — `ml/csr.py` defaults the Attention (A) component to a
+neutral 0.5 when no attention score is supplied, so opting out only
+removes a potential signal, it never forces a lower readiness score or a
+harder/easier tier. Raw camera frames are analyzed in memory and are
+never persisted — only the derived numeric score and sub-metrics are
+written to `attention_logs`, under the retention window (default 30
+days) recorded at consent time. `POST /api/attention/purge-expired`
+deletes any attention_logs rows past that window; run it on a schedule
+in a real deployment (there is no background job runner in the
+prototype yet). This is a functional consent/retention mechanism for a
+prototype, not a substitute for institutional IRB review — see the
+manuscript's Ethics, Privacy, and Fairness section for what a
+human-subjects deployment additionally requires.
+
 ## Key API Endpoints
+
 
 ### Attention Monitoring
 ```bash

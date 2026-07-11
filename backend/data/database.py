@@ -29,6 +29,10 @@ auto_courses_table = db.table("auto_courses")
 # this is the durable replacement for AdaptiveEngine._history's in-memory
 # dict (CR1/MJ4 in the peer review packet: history must survive a restart).
 csr_history_table = db.table("csr_history")
+# FIX (CR6, peer review packet): persistent store for webcam-monitoring
+# consent, keyed by student_id, so /api/attention/snapshot has something
+# to check before it ever touches a frame.
+consent_table = db.table("consent")
 
 def seed_database():
     """Populate database with initial dummy data if empty."""
@@ -320,6 +324,51 @@ def get_attention_logs(video_id: str, student_id: str) -> list[dict]:
     return attention_logs_table.search(
         (Q.video_id == video_id) & (Q.student_id == student_id)
     )
+
+
+# ── Consent (CR6 fix) ─────────────────────────────────────────
+# NeuroLearn only ever stores derived attention *scores*, never raw camera
+# frames — frames are analyzed in-memory per request and discarded (see
+# routers/attention.py). Consent governs whether those derived scores may
+# be captured/logged at all.
+
+def get_consent(student_id: str) -> Optional[dict]:
+    Q = Query()
+    return consent_table.get(Q.student_id == student_id)
+
+
+def set_consent(record: dict) -> dict:
+    Q = Query()
+    consent_table.upsert(record, Q.student_id == record["student_id"])
+    return record
+
+
+def purge_expired_attention_logs() -> int:
+    """
+    Delete attention_logs rows older than the retention window the student
+    consented to (default 30 days, see ConsentGrant.retention_days).
+    Intended to be called on a scheduled job; also safe to call from a
+    startup hook for the prototype. Returns the number of rows removed.
+    """
+    import datetime
+
+    Q = Query()
+    removed = 0
+    for consent in consent_table.all():
+        student_id = consent.get("student_id")
+        retention_days = consent.get("retention_days", 30)
+        cutoff = (
+            datetime.datetime.utcnow() - datetime.timedelta(days=retention_days)
+        ).isoformat()
+        stale = attention_logs_table.search(
+            (Q.student_id == student_id) & (Q.timestamp < cutoff)
+        )
+        if stale:
+            attention_logs_table.remove(
+                (Q.student_id == student_id) & (Q.timestamp < cutoff)
+            )
+            removed += len(stale)
+    return removed
 
 
 def get_leaderboard() -> list[dict]:

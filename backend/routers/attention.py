@@ -2,26 +2,83 @@
 ============================================================
 ROUTER: Attention — Camera-based attention monitoring
 Endpoints:
-    POST /api/attention/snapshot — analyze a camera frame
-    GET  /api/attention/history  — get attention log for a session
+    GET  /api/attention/consent        — check consent status
+    POST /api/attention/consent        — grant/revoke consent
+    POST /api/attention/snapshot       — analyze a camera frame (consent-gated)
+    GET  /api/attention/history        — get attention log for a session
+    POST /api/attention/purge-expired  — retention-window cleanup (CR6)
 ============================================================
+
+CONSENT (CR6, peer review packet): this router previously analyzed and
+logged every frame the frontend sent with no consent check, no retention
+policy, and no opt-out path. `/snapshot` now refuses to run the ML model
+or write anything to the attention log unless a prior `granted=True`
+consent record exists for that student_id AND the request itself carries
+`consent_confirmed=True` (belt-and-suspenders: the frontend gates camera
+start on consent, this is the server-side enforcement of the same rule).
+Declining consent must not silently zero-out or otherwise penalize CSR —
+`ml/csr.py` already defaults Attention (A) to a neutral 0.5 when no
+attention_score_pct is supplied, so opting out only removes the *bonus*
+signal, it never forces "easy" or "hard".
 """
 
-from fastapi import APIRouter
-from schemas.models import AttentionSnapshot, AttentionFrameRequest
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, HTTPException
+from schemas.models import (
+    AttentionSnapshot,
+    AttentionFrameRequest,
+    ConsentGrant,
+    ConsentStatus,
+)
 from ml import attention_detector
-from data.database import log_attention, get_attention_logs
+from data.database import (
+    log_attention,
+    get_attention_logs,
+    get_consent,
+    set_consent,
+    purge_expired_attention_logs,
+)
 
 router = APIRouter(prefix="/api/attention", tags=["Attention"])
+
+
+@router.get("/consent", response_model=ConsentStatus)
+async def get_consent_status(student_id: str = "student_001"):
+    """Return the current webcam-monitoring consent status for a student."""
+    record = get_consent(student_id)
+    if record is None:
+        return ConsentStatus(student_id=student_id, granted=False)
+    return ConsentStatus(**record)
+
+
+@router.post("/consent", response_model=ConsentStatus)
+async def grant_or_revoke_consent(grant: ConsentGrant):
+    """
+    Record a student's consent decision for webcam-based attention
+    monitoring. Called by the frontend ConsentModal before the camera is
+    ever started, and again if the student later revokes consent from
+    their profile/privacy settings.
+    """
+    record = {
+        "student_id": grant.student_id,
+        "granted": grant.granted,
+        "granted_at": datetime.now(timezone.utc).isoformat(),
+        "retention_days": grant.retention_days,
+        "raw_frames_stored": grant.raw_frames_stored,
+        "version": grant.version,
+    }
+    set_consent(record)
+    return ConsentStatus(**record)
 
 
 @router.post("/snapshot", response_model=AttentionSnapshot)
 async def analyze_frame(request: AttentionFrameRequest):
     """
-    Analyze a camera frame for student attention.
-
-    Receives base64-encoded frame from frontend webcam.
-    Returns attention score, state, and message.
+    Analyze a camera frame for student attention. Consent-gated (CR6):
+    returns 403 rather than analyzing or logging anything if the student
+    has not granted consent, or if the request doesn't carry
+    consent_confirmed=True.
 
     JSON Response:
     {
@@ -35,13 +92,31 @@ async def analyze_frame(request: AttentionFrameRequest):
             "head_pose": "forward",
             "face_detected": true,
             "blink_rate": 15.0
-        }
+        },
+        "source": "live",
+        "consent_confirmed": true
     }
     """
-    # Run ML model
-    result = attention_detector.analyze_frame(request.frame_base64)
+    consent_record = get_consent(request.student_id)
+    consent_on_file = bool(consent_record and consent_record.get("granted"))
 
-    # Log to database
+    if not (request.consent_confirmed and consent_on_file):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Webcam attention monitoring requires recorded consent. "
+                "Call POST /api/attention/consent with granted=true first, "
+                "then resend this request with consent_confirmed=true."
+            ),
+        )
+
+    # Run ML model (frame is analyzed in-memory and never persisted raw —
+    # only the derived score/sub-metrics below are written to storage)
+    result = attention_detector.analyze_frame(request.frame_base64)
+    result["consent_confirmed"] = True
+
+    # Log only the derived score, under the retention window the student
+    # consented to (see purge_expired_attention_logs / CR6).
     log_attention({
         "video_id": request.video_id,
         "student_id": request.student_id,
@@ -49,6 +124,18 @@ async def analyze_frame(request: AttentionFrameRequest):
     })
 
     return result
+
+
+@router.post("/purge-expired")
+async def purge_expired():
+    """
+    Delete attention_logs entries older than each student's consented
+    retention window (default 30 days). Intended to run on a schedule;
+    exposed as a manual endpoint for the prototype since there is no
+    background job runner yet.
+    """
+    removed = purge_expired_attention_logs()
+    return {"removed": removed}
 
 
 @router.get("/history")
