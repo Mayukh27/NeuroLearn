@@ -1,5 +1,7 @@
 import type { Metadata } from "next"
 import "./globals.css"
+import { AuthProvider } from "@/lib/auth"
+import RouteGuard from "@/components/RouteGuard"
 
 export const metadata: Metadata = {
   title: "NeuroLearn",
@@ -9,7 +11,11 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className="dark">
-      <body className="font-sans antialiased noise-bg">{children}</body>
+      <body className="font-sans antialiased noise-bg">
+        <AuthProvider>
+          <RouteGuard>{children}</RouteGuard>
+        </AuthProvider>
+      </body>
     </html>
   )
 }

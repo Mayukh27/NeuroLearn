@@ -17,7 +17,9 @@ export default function ProfilePage() {
   const [isLoading, setIsLoading] = useState(true)
 
   useEffect(() => {
-    fetchStudentProfile().then((s) => { setStudent(s); setIsLoading(false) })
+    fetchStudentProfile()
+      .then((s) => { setStudent(s); setIsLoading(false) })
+      .catch(() => setIsLoading(false))
   }, [])
 
   if (isLoading || !student) {

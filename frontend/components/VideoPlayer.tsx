@@ -78,7 +78,7 @@ export default function VideoPlayer({
   const [isBuffering, setIsBuffering] = useState(false)
   const [hasError, setHasError] = useState(false)
 
-  const controlsTimeout = useRef<NodeJS.Timeout>()
+  const controlsTimeout = useRef<NodeJS.Timeout | undefined>(undefined)
   const videoType = useMemo(() => detectVideoType(videoUrl), [videoUrl])
   const embedUrl = useMemo(
     () => (videoType === "youtube" ? getYouTubeEmbedUrl(videoUrl) : ""),

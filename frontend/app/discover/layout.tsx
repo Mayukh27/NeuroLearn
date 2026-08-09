@@ -17,7 +17,7 @@ export default function DiscoverLayout({ children }: { children: React.ReactNode
   const [student, setStudent] = useState<StudentProfile | null>(null)
 
   useEffect(() => {
-    fetchStudentProfile().then(setStudent)
+    fetchStudentProfile().then(setStudent).catch(() => {})
   }, [])
 
   return (

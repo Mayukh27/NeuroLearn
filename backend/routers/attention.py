@@ -24,7 +24,7 @@ signal, it never forces "easy" or "hard".
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from schemas.models import (
     AttentionSnapshot,
     AttentionFrameRequest,
@@ -39,29 +39,36 @@ from data.database import (
     set_consent,
     purge_expired_attention_logs,
 )
+from data.models_orm import User
+from auth.security import get_current_user
 
 router = APIRouter(prefix="/api/attention", tags=["Attention"])
 
 
 @router.get("/consent", response_model=ConsentStatus)
-async def get_consent_status(student_id: str = "student_001"):
-    """Return the current webcam-monitoring consent status for a student."""
-    record = get_consent(student_id)
+async def get_consent_status(current_user: User = Depends(get_current_user)):
+    """Return the current webcam-monitoring consent status for the authenticated student."""
+    record = get_consent(current_user.id)
     if record is None:
-        return ConsentStatus(student_id=student_id, granted=False)
+        return ConsentStatus(student_id=current_user.id, granted=False)
     return ConsentStatus(**record)
 
 
 @router.post("/consent", response_model=ConsentStatus)
-async def grant_or_revoke_consent(grant: ConsentGrant):
+async def grant_or_revoke_consent(
+    grant: ConsentGrant,
+    current_user: User = Depends(get_current_user),
+):
     """
-    Record a student's consent decision for webcam-based attention
-    monitoring. Called by the frontend ConsentModal before the camera is
-    ever started, and again if the student later revokes consent from
-    their profile/privacy settings.
+    Record the authenticated student's consent decision for webcam-based
+    attention monitoring. Called by the frontend ConsentModal before the
+    camera is ever started, and again if the student later revokes
+    consent from their profile/privacy settings. `grant.student_id` is
+    ignored for authorization — consent is always recorded against the
+    JWT-identified student, never an arbitrary id the client supplies.
     """
     record = {
-        "student_id": grant.student_id,
+        "student_id": current_user.id,
         "granted": grant.granted,
         "granted_at": datetime.now(timezone.utc).isoformat(),
         "retention_days": grant.retention_days,
@@ -73,12 +80,15 @@ async def grant_or_revoke_consent(grant: ConsentGrant):
 
 
 @router.post("/snapshot", response_model=AttentionSnapshot)
-async def analyze_frame(request: AttentionFrameRequest):
+async def analyze_frame(
+    request: AttentionFrameRequest,
+    current_user: User = Depends(get_current_user),
+):
     """
-    Analyze a camera frame for student attention. Consent-gated (CR6):
-    returns 403 rather than analyzing or logging anything if the student
-    has not granted consent, or if the request doesn't carry
-    consent_confirmed=True.
+    Analyze a camera frame for the authenticated student's attention.
+    Consent-gated (CR6): returns 403 rather than analyzing or logging
+    anything if the student has not granted consent, or if the request
+    doesn't carry consent_confirmed=True.
 
     JSON Response:
     {
@@ -97,7 +107,7 @@ async def analyze_frame(request: AttentionFrameRequest):
         "consent_confirmed": true
     }
     """
-    consent_record = get_consent(request.student_id)
+    consent_record = get_consent(current_user.id)
     consent_on_file = bool(consent_record and consent_record.get("granted"))
 
     if not (request.consent_confirmed and consent_on_file):
@@ -119,7 +129,7 @@ async def analyze_frame(request: AttentionFrameRequest):
     # consented to (see purge_expired_attention_logs / CR6).
     log_attention({
         "video_id": request.video_id,
-        "student_id": request.student_id,
+        "student_id": current_user.id,
         **result,
     })
 
@@ -139,12 +149,12 @@ async def purge_expired():
 
 
 @router.get("/history")
-async def get_attention_history(video_id: str, student_id: str = "student_001"):
-    """Get attention logs for a video watching session."""
-    logs = get_attention_logs(video_id, student_id)
+async def get_attention_history(video_id: str, current_user: User = Depends(get_current_user)):
+    """Get attention logs for a video watching session (your own only)."""
+    logs = get_attention_logs(video_id, current_user.id)
     return {
         "video_id": video_id,
-        "student_id": student_id,
+        "student_id": current_user.id,
         "total_snapshots": len(logs),
         "logs": logs,
         "average_score": (

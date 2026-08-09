@@ -17,7 +17,13 @@ python-multipart>=0.0.9
 python-dotenv>=1.0.0
 
 # ── Data / Storage ─────────────────────────────────────────
-tinydb>=4.8.0
+# Postgres (replaces tinydb — see data/db.py, data/models_orm.py)
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.9
+# Auth
+bcrypt>=4.0.0
+python-jose[cryptography]>=3.3.0
+python-multipart>=0.0.9
 pydantic>=2.6.0
 
 # ── ML / AI ────────────────────────────────────────────────
@@ -52,3 +58,4 @@ playwright>=1.43.0
 
 # Fallback scraper: yt-dlp (metadata-only, no download)
 yt-dlp>=2024.4.9
+alembic>=1.13.0

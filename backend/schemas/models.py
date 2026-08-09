@@ -52,6 +52,62 @@ class XPAwardResponse(BaseModel):
     xp_to_next_level: int
 
 
+# ── Auth ──────────────────────────────────────────────────────
+
+class SignupRequest(BaseModel):
+    email: str
+    password: str
+    name: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    # FIX (remaining-things request): access tokens are now short-lived
+    # (30 min) — the refresh_token is what actually keeps a session
+    # alive, and unlike the access token it can be revoked server-side.
+    refresh_token: str
+    user: StudentProfile
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class RefreshResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    refresh_token: str  # rotated — the old one is revoked
+
+
+class LogoutRequest(BaseModel):
+    refresh_token: str
+
+
+class RequestPasswordResetRequest(BaseModel):
+    email: str
+
+
+class RequestPasswordResetResponse(BaseModel):
+    message: str
+    # FIX (remaining-things request): no SMTP is configured in most dev/
+    # demo environments. Rather than silently doing nothing (or crashing)
+    # when email can't actually be sent, the raw reset token is returned
+    # directly in the response ONLY when SMTP isn't configured — clearly
+    # a dev-mode fallback, never in a real deployment with email set up.
+    dev_reset_token: Optional[str] = None
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+
 # ── Courses ─────────────────────────────────────────────────
 
 class VideoLink(BaseModel):
@@ -271,6 +327,14 @@ class AssessmentResult(BaseModel):
     # FastAPI's response_model filtering since it was never declared here;
     # `timestamp` is new, needed for get_recent_scores_pct() DB ordering.
     student_id: Optional[str] = None
+    # Auth/real-XP fix additions: reflects the *actual* persisted XP state
+    # after this submission (previously xp_earned was computed but never
+    # written to the student's record — see routers/assessment.py's
+    # _apply_xp()). The frontend should use these, not just xp_earned, to
+    # display the student's running total.
+    total_xp: Optional[int] = None
+    new_level: Optional[int] = None
+    leveled_up: Optional[bool] = None
     timestamp: Optional[float] = None
 
 

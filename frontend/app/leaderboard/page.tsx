@@ -17,7 +17,9 @@ export default function LeaderboardPage() {
   const [isLoading, setIsLoading] = useState(true)
 
   useEffect(() => {
-    fetchLeaderboard().then((data) => { setEntries(data); setIsLoading(false) })
+    fetchLeaderboard()
+      .then((data) => { setEntries(data); setIsLoading(false) })
+      .catch(() => setIsLoading(false))
   }, [])
 
   if (isLoading) {

@@ -10,7 +10,8 @@ Endpoints:
 
 import uuid
 import time
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+from sqlalchemy.orm import Session
 from schemas.models import (
     AssessmentSession,
     AssessmentResult,
@@ -25,13 +26,48 @@ from data.database import (
     get_student_results,
     get_recent_scores_pct,
     save_csr_record,
+    advance_challenge_progress,
 )
+from data.db import get_db
+from data.models_orm import User
+from auth.security import get_current_user
 
 router = APIRouter(prefix="/api/assessment", tags=["Assessment"])
 
 
+def _apply_xp(user: User, amount: int, db: Session) -> dict:
+    """
+    Actually persist earned XP to the student's record, with the same
+    level-up math as POST /api/student/xp.
+
+    FIX (real XP request): submit_assessment previously computed
+    `xp_earned` and returned it in the response WITHOUT ever writing it
+    to the student's record — the number shown to the frontend was
+    real-looking but never actually banked, so it never moved the
+    leaderboard or the student's level. This is the fix: XP is now
+    credited here, in the same transaction as the assessment result.
+    """
+    new_xp = user.xp + amount
+    leveled_up = False
+    new_level = user.level
+    xp_to_next = user.xp_to_next_level
+    if new_xp >= xp_to_next:
+        leveled_up = True
+        new_level += 1
+        new_xp -= xp_to_next
+        xp_to_next = int(xp_to_next * 1.2)
+    user.xp = new_xp
+    user.level = new_level
+    user.xp_to_next_level = xp_to_next
+    db.commit()
+    return {"new_xp": new_xp, "new_level": new_level, "leveled_up": leveled_up, "xp_to_next_level": xp_to_next}
+
+
 @router.post("/generate", response_model=AssessmentSession)
-async def generate_assessment(request: GenerateAssessmentRequest):
+async def generate_assessment(
+    request: GenerateAssessmentRequest,
+    current_user: User = Depends(get_current_user),
+):
     """
     Generate an adaptive assessment.
 
@@ -45,6 +81,11 @@ async def generate_assessment(request: GenerateAssessmentRequest):
     JSON Response includes adaptive_metadata explaining WHY
     this difficulty was chosen.
     """
+    # Auth request: the JWT is authoritative, not whatever student_id the
+    # client put in the request body — this closes the "pass a different
+    # student_id and read/act on someone else's data" gap.
+    request.student_id = current_user.id
+
     # Step 1: Determine difficulty
     difficulty_result = adaptive_engine.get_initial_difficulty(
         student_id=request.student_id,
@@ -94,7 +135,11 @@ async def generate_assessment(request: GenerateAssessmentRequest):
 
 
 @router.post("/submit", response_model=AssessmentResult)
-async def submit_assessment(request: SubmitAssessmentRequest):
+async def submit_assessment(
+    request: SubmitAssessmentRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """
     Submit assessment answers and get adaptive results.
 
@@ -111,6 +156,9 @@ async def submit_assessment(request: SubmitAssessmentRequest):
         - strength/weak areas
         - recommended action text
     """
+    # Auth request: identity comes from the JWT, not the request body.
+    request.student_id = current_user.id
+
     # Get session
     session = get_assessment_session(request.session_id)
     if not session:
@@ -132,6 +180,19 @@ async def submit_assessment(request: SubmitAssessmentRequest):
 
     percentage = round((correct_count / max(len(questions), 1)) * 100, 1)
     xp_earned = int(earned_points * 1.5)
+
+    # FIX (real XP request): this used to be where xp_earned's story
+    # ended — computed, put in the response dict, never written to the
+    # student's row. Now it's actually credited, in real time, to the
+    # authenticated student's Postgres record.
+    xp_result = _apply_xp(current_user, xp_earned, db)
+
+    # FIX (remaining-things request): the "Perfect Quiz" daily challenge
+    # existed in the seed data but nothing anywhere ever completed it —
+    # there was no code path that advanced challenge progress at all.
+    # A 100% score now completes it for real, same day, once.
+    if percentage >= 100:
+        advance_challenge_progress(current_user.id, "quiz", set_to=1)
 
     # Phase 12 fix: pull score history from the DURABLE results_table
     # instead of relying solely on AdaptiveEngine's in-memory dict, so
@@ -186,6 +247,12 @@ async def submit_assessment(request: SubmitAssessmentRequest):
         "earned_points": earned_points,
         "percentage": percentage,
         "xp_earned": xp_earned,
+        # Real, persisted values (see _apply_xp above) — not just the
+        # per-assessment delta, but where the student's account actually
+        # landed after this submission.
+        "total_xp": xp_result["new_xp"],
+        "new_level": xp_result["new_level"],
+        "leveled_up": xp_result["leveled_up"],
         "time_spent": request.time_spent,
         "correct_answers": correct_count,
         "total_questions": len(questions),
@@ -234,17 +301,22 @@ async def submit_assessment(request: SubmitAssessmentRequest):
 
 
 @router.get("/session/{session_id}")
-async def get_session(session_id: str):
-    """Get assessment session details."""
+async def get_session(session_id: str, current_user: User = Depends(get_current_user)):
+    """Get assessment session details — only the session's own owner may view it."""
     session = get_assessment_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    if session.get("student_id") != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your session")
     return session
 
 
 @router.get("/results/{student_id}")
-async def get_results_history(student_id: str):
-    """Get all assessment results for a student."""
+async def get_results_history(student_id: str, current_user: User = Depends(get_current_user)):
+    """Get all assessment results for a student — only your own, for now
+    (no admin/instructor role exists yet to justify viewing others')."""
+    if student_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You can only view your own results")
     results = get_student_results(student_id)
     return {
         "student_id": student_id,

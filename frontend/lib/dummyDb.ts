@@ -57,6 +57,9 @@ export interface VideoLink {
   order: number
   completed: boolean
   watchedPercent: number
+  // FIX (course generator request): preserved from the auto-generator's
+  // curriculum-stage assignment when a course is saved to the dashboard.
+  stageLabel?: string
 }
 
 export interface AttentionSnapshot {

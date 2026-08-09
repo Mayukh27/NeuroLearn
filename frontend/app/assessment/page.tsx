@@ -37,7 +37,7 @@ function AssessmentContent() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [timeRemaining, setTimeRemaining] = useState(0)
   const [startTime] = useState(Date.now())
-  const timerRef = useRef<NodeJS.Timeout>()
+  const timerRef = useRef<NodeJS.Timeout | undefined>(undefined)
 
   // Fetch transcript text from window (set by TranscriptionPanel)
   const getTranscriptText = (): string => {

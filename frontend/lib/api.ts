@@ -36,6 +36,13 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api"
 const STRICT_MODE = process.env.NEXT_PUBLIC_API_STRICT === "true"
 const SAVED_AUTO_COURSES_KEY = "neurolearn_saved_auto_courses"
 
+// FIX (auth request): every request now carries the logged-in student's
+// JWT, read lazily here to avoid a circular import at module-load time
+// (lib/auth.ts doesn't import from lib/api.ts, but importing getToken
+// directly up top is still safe — kept as a function call for clarity
+// about where the token actually comes from).
+import { getToken, getCachedUserId, tryRefreshAccessToken } from "./auth"
+
 export interface DiscoveredVideo {
   id: string
   title: string
@@ -45,6 +52,12 @@ export interface DiscoveredVideo {
   channel: string
   assessmentAvailable: boolean
   transcriptionAvailable: boolean
+  // FIX (course generator request): which curriculum stage this video
+  // covers (Fundamentals/Core Concepts/Intermediate/Advanced/Applied
+  // Project) — the generator used to return several videos that all
+  // covered the same beginner ground; this field is what lets the UI
+  // show (and lets you verify) that a course now actually has range.
+  stageLabel?: string
 }
 
 export interface AutoCourse {
@@ -144,15 +157,44 @@ async function apiFetch<T>(
   fallback?: () => T | Promise<T>
 ): Promise<T> {
   try {
-    const res = await fetch(`${API_BASE}${path}`, {
-      headers: { "Content-Type": "application/json", ...options?.headers },
-      ...options,
-    })
+    const doRequest = async () => {
+      const token = getToken()
+      return fetch(`${API_BASE}${path}`, {
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...options?.headers,
+        },
+        ...options,
+      })
+    }
+
+    let res = await doRequest()
+
+    // FIX (remaining-things request): access tokens now expire in 30
+    // minutes (was a stateless 10h token with no refresh mechanism at
+    // all). A 401 here first tries one silent refresh — this is what
+    // stops "session expired" from happening every 30 minutes during
+    // normal use instead of only at the very end of a long refresh-token
+    // lifetime (30 days).
+    if (res.status === 401) {
+      const refreshed = await tryRefreshAccessToken()
+      if (refreshed) {
+        res = await doRequest()
+      }
+    }
+
+    if (res.status === 401) {
+      const { AuthError } = await import("./auth")
+      throw new AuthError()
+    }
     if (!res.ok) throw new Error(`API ${res.status}: ${res.statusText}`)
     const data = await res.json()
     // Normalize snake_case keys from backend to camelCase for frontend
     return normalizeKeys(data) as T
   } catch (err) {
+    if (err instanceof Error && err.name === "AuthError") throw err
+
     const errMsg = err instanceof Error ? err.message : String(err)
     const isNetworkIssue = /Failed to fetch|NetworkError|Load failed/i.test(errMsg)
 
@@ -216,7 +258,7 @@ export async function saveAutoCourseToDashboard(
 /** GET /api/student/profile */
 export async function fetchStudentProfile(): Promise<StudentProfile> {
   return apiFetch<StudentProfile>(
-    "/student/profile?student_id=student_001",
+    "/student/profile",
     { method: "GET" },
     async () => {
       await delay(200)
@@ -228,7 +270,7 @@ export async function fetchStudentProfile(): Promise<StudentProfile> {
 /** POST /api/student/xp */
 export async function awardXP(
   amount: number,
-  studentId: string = "student_001"
+  studentId: string = getCachedUserId() ?? "student_001"
 ): Promise<{ newXP: number; newLevel: number; leveledUp: boolean; xpToNextLevel: number }> {
   return apiFetch(
     "/student/xp",
@@ -308,13 +350,17 @@ export async function fetchVideoById(
 export async function sendAttentionFrame(
   frameBase64: string,
   videoId: string,
-  studentId: string = "student_001"
+  studentId: string = getCachedUserId() ?? "student_001"
 ): Promise<AttentionSnapshot> {
   return apiFetch<AttentionSnapshot>(
     "/attention/snapshot",
     {
       method: "POST",
-      body: JSON.stringify({ frame_base64: frameBase64, video_id: videoId, student_id: studentId }),
+      // consent_confirmed must be explicitly true or the backend's
+      // consent gate (CR6, peer review packet) 403s — see ConsentModal.tsx,
+      // which is what actually gates whether this function should even
+      // be called.
+      body: JSON.stringify({ frame_base64: frameBase64, video_id: videoId, student_id: studentId, consent_confirmed: true }),
     },
     async () => generateAttentionSnapshot()
   )
@@ -332,7 +378,7 @@ export async function fetchDummyAttention(): Promise<AttentionSnapshot> {
 /** GET /api/attention/history */
 export async function fetchAttentionHistory(
   videoId: string,
-  studentId: string = "student_001"
+  studentId: string = getCachedUserId() ?? "student_001"
 ): Promise<{ logs: AttentionSnapshot[]; average_score: number }> {
   return apiFetch(
     `/attention/history?video_id=${videoId}&student_id=${studentId}`,
@@ -444,6 +490,14 @@ export interface AssessmentResult {
   earnedPoints: number
   percentage: number
   xpEarned: number
+  // FIX (real XP request): reflects the *actual* persisted XP/level after
+  // this submission (see backend routers/assessment.py's _apply_xp()) —
+  // previously xpEarned was computed but never written to the student's
+  // record, so there was nothing truthful to show here. Optional so
+  // older cached results / the dummy fallback path don't break existing UI.
+  totalXp?: number
+  newLevel?: number
+  leveledUp?: boolean
   timeSpent: number
   correctAnswers: number
   totalQuestions: number
@@ -483,7 +537,7 @@ export async function generateAssessment(
       body: JSON.stringify({
         course_id: courseId,
         video_id: videoId,
-        student_id: "student_001",
+        student_id: getCachedUserId() ?? "student_001",
         attention_score: attentionScore,
         previous_score: previousScore,
         transcript_text: transcriptText,
@@ -537,7 +591,7 @@ export async function submitAssessment(
       method: "POST",
       body: JSON.stringify({
         session_id: sessionId,
-        student_id: "student_001",
+        student_id: getCachedUserId() ?? "student_001",
         answers,
         time_spent: timeSpent,
       }),
@@ -642,7 +696,7 @@ function dummyCsrHistory(studentId: string): CsrHistoryEntry[] {
 
 /** GET /api/csr/{student_id} */
 export async function fetchCurrentCsr(
-  studentId: string = "student_001"
+  studentId: string = getCachedUserId() ?? "student_001"
 ): Promise<CsrHistoryEntry | null> {
   return apiFetch<CsrHistoryEntry | null>(
     `/csr/${studentId}`,
@@ -657,7 +711,7 @@ export async function fetchCurrentCsr(
 
 /** GET /api/csr/{student_id}/history */
 export async function fetchCsrHistory(
-  studentId: string = "student_001",
+  studentId: string = getCachedUserId() ?? "student_001",
   limit?: number
 ): Promise<CsrHistoryEntry[]> {
   const query = limit ? `?limit=${limit}` : ""
@@ -696,7 +750,7 @@ export async function fetchDailyChallenges(): Promise<DailyChallenge[]> {
 /** GET /api/notifications */
 export async function fetchNotifications(): Promise<Notification[]> {
   return apiFetch<Notification[]>(
-    "/notifications?student_id=student_001",
+    "/notifications",
     { method: "GET" },
     async () => { await delay(100); return JSON.parse(JSON.stringify(DUMMY_NOTIFICATIONS)) }
   )

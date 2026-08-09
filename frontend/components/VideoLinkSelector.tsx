@@ -83,6 +83,11 @@ export default function VideoLinkSelector({
 
               {/* Title + meta */}
               <div className="flex-1 min-w-0">
+                {video.stageLabel && (
+                  <span className="inline-block mb-0.5 text-[8px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded-full bg-violet-500/15 text-violet-400">
+                    {video.stageLabel}
+                  </span>
+                )}
                 <p
                   className={`text-xs font-medium truncate ${
                     isActive
@@ -101,16 +106,16 @@ export default function VideoLinkSelector({
                       {formatDuration(video.duration)}
                     </span>
                   </div>
-                  {video.watched_percent > 0 && video.watched_percent < 100 && (
+                  {video.watchedPercent > 0 && video.watchedPercent < 100 && (
                     <div className="flex items-center gap-1">
                       <div className="w-12 h-0.5 rounded-full bg-[var(--bg-primary)] overflow-hidden">
                         <div
                           className="h-full rounded-full bg-violet-500"
-                          style={{ width: `${video.watched_percent}%` }}
+                          style={{ width: `${video.watchedPercent}%` }}
                         />
                       </div>
                       <span className="text-[8px] text-[var(--text-muted)]">
-                        {video.watched_percent}%
+                        {video.watchedPercent}%
                       </span>
                     </div>
                   )}

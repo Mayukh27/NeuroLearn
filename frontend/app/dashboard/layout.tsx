@@ -9,7 +9,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [student, setStudent] = useState<StudentProfile | null>(null)
 
   useEffect(() => {
-    fetchStudentProfile().then(setStudent)
+    fetchStudentProfile()
+      .then(setStudent)
+      .catch(() => {
+        // RouteGuard (app/layout.tsx) already redirects to /login on a
+        // missing/expired session before this layout would normally
+        // mount without one; this catch just prevents an unhandled
+        // promise rejection in the rare race where it fires first.
+      })
   }, [])
 
   return (

@@ -6,7 +6,7 @@ import { fetchStudentProfile, type StudentProfile } from "@/lib/api"
 
 export default function LeaderboardLayout({ children }: { children: React.ReactNode }) {
   const [student, setStudent] = useState<StudentProfile | null>(null)
-  useEffect(() => { fetchStudentProfile().then(setStudent) }, [])
+  useEffect(() => { fetchStudentProfile().then(setStudent).catch(() => {}) }, [])
   return (
     <div className="min-h-screen bg-[var(--bg-primary)] flex">
       <Sidebar xp={student?.xp||0} xpToNextLevel={student?.xpToNextLevel||1} level={student?.level||1} streak={student?.streak||0} />

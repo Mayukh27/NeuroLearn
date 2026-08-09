@@ -1,237 +1,227 @@
+"""
+data/database.py — Postgres-backed data access layer.
 
-import os
-import json
+FIX (auth/postgres/xp/leaderboard request): this file previously wrote to
+a TinyDB JSON file (data/database_tinydb_legacy.py, kept for reference)
+despite the manuscript claiming "PostgreSQL-backed persistence" — a real
+claim-vs-implementation gap. This version is backed by an actual Postgres
+database (see data/db.py) via SQLAlchemy.
+
+Function names and return shapes are kept as close as possible to the
+legacy TinyDB version so the routers that import from this module did
+not all need to be rewritten — only the handful that needed real
+authentication or that were silently not persisting XP were changed
+(routers/student.py, routers/assessment.py, routers/gamification.py,
+routers/auth.py — new).
+"""
 from typing import Optional
-from tinydb import TinyDB, Query
+from datetime import datetime, date, timedelta
+
 from loguru import logger
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-DB_PATH = os.getenv("DB_PATH", "./data/neurolearn_db.json")
+from data.db import SessionLocal
+from data.models_orm import (
+    User, Course, AutoCourse, AssessmentSession, AssessmentResult,
+    CSRHistory, Consent, AttentionLog, DailyChallenge, Notification,
+    DailyChallengeProgress, PasswordResetToken, RefreshToken,
+)
 
-# Ensure data directory exists
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
-db = TinyDB(DB_PATH)
+def _session() -> Session:
+    """Short-lived session for the simple functions below (mirrors the
+    original TinyDB functions' style of "just do the operation and
+    return" with no explicit session threading through every call site)."""
+    return SessionLocal()
 
-# Tables
-students_table = db.table("students")
-courses_table = db.table("courses")
-assessments_table = db.table("assessment_sessions")
-results_table = db.table("assessment_results")
-leaderboard_table = db.table("leaderboard")
-challenges_table = db.table("daily_challenges")
-notifications_table = db.table("notifications")
-attention_logs_table = db.table("attention_logs")
-transcripts_table = db.table("transcripts")
-auto_courses_table = db.table("auto_courses")
-# Phase 10 (NeuroLearn-MCL implementation spec): persistent CSR history.
-# One record per assessment, holding every CSR component (P, A, I, T, C),
-# the fused CSR, the selected difficulty, and the adaptive explanation —
-# this is the durable replacement for AdaptiveEngine._history's in-memory
-# dict (CR1/MJ4 in the peer review packet: history must survive a restart).
-csr_history_table = db.table("csr_history")
-# FIX (CR6, peer review packet): persistent store for webcam-monitoring
-# consent, keyed by student_id, so /api/attention/snapshot has something
-# to check before it ever touches a frame.
-consent_table = db.table("consent")
 
-def seed_database():
-    """Populate database with initial dummy data if empty."""
-    Q = Query()
+# ── Users / Students ────────────────────────────────────────
+# NOTE: "student" and "user" are the same row (see models_orm.User) —
+# every account created via /api/auth/signup is a student profile.
 
-    # ── Student ──
-    if not students_table.search(Q.id == "student_001"):
-        students_table.insert({
-            "id": "student_001",
-            "name": "Alex Johnson",
-            "email": "alex@neurolearn.io",
-            "avatar": "/placeholder-user.jpg",
-            "level": 12,
-            "xp": 4250,
-            "xp_to_next_level": 5000,
-            "streak": 7,
-            "best_streak": 14,
-            "total_courses_completed": 4,
-            "total_watch_time": 1260,
-            "joined_date": "2024-09-15",
-            "rank": 23,
-            "badges": [
-                {"id": "b1", "name": "First Steps", "description": "Complete your first lesson", "icon": "👣", "earned": True, "earned_date": "2024-09-16", "rarity": "common"},
-                {"id": "b2", "name": "Week Warrior", "description": "Maintain a 7-day streak", "icon": "⚔️", "earned": True, "earned_date": "2024-09-23", "rarity": "rare"},
-                {"id": "b3", "name": "Perfect Score", "description": "Score 100% on an assessment", "icon": "💯", "earned": False, "rarity": "epic"},
-                {"id": "b4", "name": "Speed Learner", "description": "Complete 5 lessons in one day", "icon": "🚀", "earned": False, "rarity": "epic"},
-                {"id": "b5", "name": "Century Club", "description": "Earn 1000 XP", "icon": "💎", "earned": True, "earned_date": "2024-10-01", "rarity": "legendary"},
-                {"id": "b6", "name": "Night Owl", "description": "Study past midnight", "icon": "🦉", "earned": True, "earned_date": "2024-10-05", "rarity": "common"},
-                {"id": "b7", "name": "Quiz Master", "description": "Complete 50 quizzes", "icon": "🧠", "earned": False, "rarity": "legendary"},
-                {"id": "b8", "name": "Social Butterfly", "description": "Join a study group", "icon": "🦋", "earned": False, "rarity": "rare"},
-            ],
-        })
-        logger.info("Seeded student profile")
+def _user_to_dict(user: User, db: Session) -> dict:
+    """Shape a User row into the same dict shape StudentProfile expects,
+    including a live-computed `rank` (position in the real leaderboard —
+    see get_leaderboard) rather than a stored, staleable rank field."""
+    rank = _compute_rank(db, user.id)
+    return {
+        "id": user.id,
+        "name": user.name,
+        "email": user.email,
+        "avatar": user.avatar,
+        "level": user.level,
+        "xp": user.xp,
+        "xp_to_next_level": user.xp_to_next_level,
+        "streak": user.streak,
+        "best_streak": user.best_streak,
+        "total_courses_completed": user.total_courses_completed,
+        "total_watch_time": user.total_watch_time,
+        "joined_date": user.joined_date.isoformat() if isinstance(user.joined_date, date) else str(user.joined_date),
+        "rank": rank,
+        "badges": user.badges or [],
+    }
 
-    # ── Courses ──
-    if not courses_table.search(Q.id == "course_001"):
-        courses = [
-            {
-                "id": "course_001",
-                "title": "Introduction to React",
-                "description": "Master the fundamentals of React including components, props, state, and hooks",
-                "icon": "⚛️", "category": "Frontend", "difficulty": "Beginner",
-                "total_videos": 8, "completed_videos": 5, "progress": 65, "estimated_hours": 6,
-                "tags": ["React", "JavaScript", "Frontend"],
-                "video_links": [
-                    {"id": "v1", "title": "What is React? — Introduction & Setup", "url": "https://www.youtube.com/watch?v=SqcY0GlETPk", "duration": 720, "thumbnail": "", "order": 1, "completed": True, "watched_percent": 100},
-                    {"id": "v2", "title": "JSX & Components Deep Dive", "url": "https://www.youtube.com/watch?v=9YkUCRr3bVc", "duration": 890, "thumbnail": "", "order": 2, "completed": True, "watched_percent": 100},
-                    {"id": "v3", "title": "Props & Data Flow", "url": "https://www.youtube.com/watch?v=PHaECbrKgs0", "duration": 650, "thumbnail": "", "order": 3, "completed": True, "watched_percent": 100},
-                    {"id": "v4", "title": "State & useState Hook", "url": "https://www.youtube.com/watch?v=O6P86uwfdR0", "duration": 780, "thumbnail": "", "order": 4, "completed": True, "watched_percent": 100},
-                    {"id": "v5", "title": "useEffect & Side Effects", "url": "https://www.youtube.com/watch?v=0ZJgIjIuY7U", "duration": 920, "thumbnail": "", "order": 5, "completed": True, "watched_percent": 100},
-                    {"id": "v6", "title": "Event Handling & Forms", "url": "https://www.youtube.com/watch?v=dH6i3GurZW8", "duration": 640, "thumbnail": "", "order": 6, "completed": False, "watched_percent": 35},
-                    {"id": "v7", "title": "Conditional Rendering", "url": "https://www.youtube.com/watch?v=4oCVDkb_peY", "duration": 540, "thumbnail": "", "order": 7, "completed": False, "watched_percent": 0},
-                    {"id": "v8", "title": "Lists & Keys", "url": "https://www.youtube.com/watch?v=0sasRxl35_8", "duration": 480, "thumbnail": "", "order": 8, "completed": False, "watched_percent": 0},
-                ],
-            },
-            {
-                "id": "course_002",
-                "title": "Advanced State Management",
-                "description": "Redux, Context API, Zustand and modern state patterns",
-                "icon": "🔄", "category": "Frontend", "difficulty": "Intermediate",
-                "total_videos": 6, "completed_videos": 2, "progress": 42, "estimated_hours": 8,
-                "tags": ["Redux", "Context API", "Zustand"],
-                "video_links": [
-                    {"id": "v9", "title": "Why State Management Matters", "url": "https://www.youtube.com/watch?v=CVpUuw9XSjY", "duration": 600, "thumbnail": "", "order": 1, "completed": True, "watched_percent": 100},
-                    {"id": "v10", "title": "Context API Fundamentals", "url": "https://www.youtube.com/watch?v=5LrDIWkK_Bc", "duration": 750, "thumbnail": "", "order": 2, "completed": True, "watched_percent": 100},
-                    {"id": "v11", "title": "Redux Toolkit Setup", "url": "https://www.youtube.com/watch?v=9zySeP5vH9c", "duration": 880, "thumbnail": "", "order": 3, "completed": False, "watched_percent": 20},
-                    {"id": "v12", "title": "Redux Thunk & Async", "url": "https://www.youtube.com/watch?v=93p3LxR9xfM", "duration": 920, "thumbnail": "", "order": 4, "completed": False, "watched_percent": 0},
-                    {"id": "v13", "title": "Zustand — Lightweight Alternative", "url": "https://www.youtube.com/watch?v=_ngCLZ5Iz-0", "duration": 680, "thumbnail": "", "order": 5, "completed": False, "watched_percent": 0},
-                    {"id": "v14", "title": "State Architecture Patterns", "url": "https://www.youtube.com/watch?v=HKU24nY8Hsc", "duration": 700, "thumbnail": "", "order": 6, "completed": False, "watched_percent": 0},
-                ],
-            },
-            {
-                "id": "course_003",
-                "title": "Performance Optimization",
-                "description": "React.memo, useMemo, code splitting, lazy loading, and profiling",
-                "icon": "⚡", "category": "Frontend", "difficulty": "Advanced",
-                "total_videos": 5, "completed_videos": 1, "progress": 28, "estimated_hours": 5,
-                "tags": ["Performance", "Optimization", "React"],
-                "video_links": [
-                    {"id": "v15", "title": "React Performance Basics", "url": "https://www.youtube.com/watch?v=b1IQI4aJHLM", "duration": 800, "thumbnail": "", "order": 1, "completed": True, "watched_percent": 100},
-                    {"id": "v16", "title": "React.memo & useMemo", "url": "https://www.youtube.com/watch?v=THL1OPn72vo", "duration": 700, "thumbnail": "", "order": 2, "completed": False, "watched_percent": 40},
-                    {"id": "v17", "title": "Code Splitting & Lazy Loading", "url": "https://www.youtube.com/watch?v=JU6sl_yyZqs", "duration": 650, "thumbnail": "", "order": 3, "completed": False, "watched_percent": 0},
-                    {"id": "v18", "title": "Profiler & DevTools", "url": "https://www.youtube.com/watch?v=LfEkP0bpFLc", "duration": 600, "thumbnail": "", "order": 4, "completed": False, "watched_percent": 0},
-                    {"id": "v19", "title": "Real-world Optimization Case Study", "url": "https://www.youtube.com/watch?v=i8xbddI2Mg8", "duration": 900, "thumbnail": "", "order": 5, "completed": False, "watched_percent": 0},
-                ],
-            },
-        ]
-        for course in courses:
-            courses_table.insert(course)
-        logger.info(f"Seeded {len(courses)} courses")
 
-    # ── Leaderboard ──
-    if not leaderboard_table.all():
-        entries = [
-            {"rank": 1, "student_id": "s10", "name": "Priya Sharma", "avatar": "", "xp": 12500, "level": 24, "streak": 32, "courses_completed": 12},
-            {"rank": 2, "student_id": "s11", "name": "Marcus Chen", "avatar": "", "xp": 11200, "level": 22, "streak": 28, "courses_completed": 10},
-            {"rank": 3, "student_id": "s12", "name": "Sofia Reyes", "avatar": "", "xp": 10800, "level": 21, "streak": 15, "courses_completed": 11},
-            {"rank": 4, "student_id": "s13", "name": "Aiden Okafor", "avatar": "", "xp": 9500, "level": 19, "streak": 20, "courses_completed": 9},
-            {"rank": 5, "student_id": "s14", "name": "Emma Williams", "avatar": "", "xp": 8900, "level": 18, "streak": 12, "courses_completed": 8},
-            {"rank": 23, "student_id": "student_001", "name": "Alex Johnson", "avatar": "", "xp": 4250, "level": 12, "streak": 7, "courses_completed": 4},
-        ]
-        for e in entries:
-            leaderboard_table.insert(e)
-        logger.info("Seeded leaderboard")
-
-    # ── Daily Challenges ──
-    if not challenges_table.all():
-        challenges = [
-            {"id": "dc1", "title": "Watch 30 minutes", "description": "Watch any video for 30 minutes", "xp_reward": 50, "type": "watch", "completed": True, "progress": 30, "target": 30},
-            {"id": "dc2", "title": "Perfect Quiz", "description": "Score 100% on any quiz", "xp_reward": 100, "type": "quiz", "completed": False, "progress": 0, "target": 1},
-            {"id": "dc3", "title": "Streak Keeper", "description": "Log in and study today", "xp_reward": 25, "type": "streak", "completed": True, "progress": 1, "target": 1},
-            {"id": "dc4", "title": "Review Master", "description": "Review 3 completed lessons", "xp_reward": 75, "type": "review", "completed": False, "progress": 1, "target": 3},
-        ]
-        for c in challenges:
-            challenges_table.insert(c)
-        logger.info("Seeded daily challenges")
-
-    # ── Notifications ──
-    if not notifications_table.all():
-        notifs = [
-            {"id": "n1", "type": "achievement", "title": "Badge Earned!", "message": "You earned the Night Owl badge", "timestamp": "2 hours ago", "read": False, "icon": "🦉"},
-            {"id": "n2", "type": "milestone", "title": "Level Up!", "message": "You reached Level 12", "timestamp": "1 day ago", "read": False, "icon": "⬆️"},
-            {"id": "n3", "type": "challenge", "title": "Daily Challenge", "message": "New challenges available!", "timestamp": "3 hours ago", "read": True, "icon": "🎯"},
-        ]
-        for n in notifs:
-            notifications_table.insert(n)
-        logger.info("Seeded notifications")
-
-    logger.success("Database seeding complete")
-
+def _compute_rank(db: Session, student_id: str) -> int:
+    """1-indexed position of student_id in the real, live XP ordering —
+    replaces the old static `rank` field that was seeded once and never
+    recalculated as XP changed."""
+    ids_by_xp = [
+        row[0] for row in db.execute(
+            select(User.id).order_by(User.xp.desc())
+        ).all()
+    ]
+    try:
+        return ids_by_xp.index(student_id) + 1
+    except ValueError:
+        return len(ids_by_xp) + 1
 
 
 def get_student(student_id: str) -> Optional[dict]:
-    Q = Query()
-    results = students_table.search(Q.id == student_id)
-    return results[0] if results else None
+    db = _session()
+    try:
+        user = db.get(User, student_id)
+        return _user_to_dict(user, db) if user else None
+    finally:
+        db.close()
 
 
 def update_student(student_id: str, updates: dict):
-    Q = Query()
-    students_table.update(updates, Q.id == student_id)
+    db = _session()
+    try:
+        user = db.get(User, student_id)
+        if not user:
+            return
+        for k, v in updates.items():
+            setattr(user, k, v)
+        db.commit()
+    finally:
+        db.close()
 
+
+# ── Courses ──────────────────────────────────────────────────
 
 def get_all_courses() -> list[dict]:
-    return courses_table.all()
+    db = _session()
+    try:
+        rows = db.execute(select(Course)).scalars().all()
+        return [_course_to_dict(c) for c in rows]
+    finally:
+        db.close()
 
 
 def get_course(course_id: str) -> Optional[dict]:
-    Q = Query()
-    results = courses_table.search(Q.id == course_id)
-    return results[0] if results else None
+    db = _session()
+    try:
+        c = db.get(Course, course_id)
+        return _course_to_dict(c) if c else None
+    finally:
+        db.close()
 
+
+def _course_to_dict(c: Course) -> dict:
+    return {
+        "id": c.id, "title": c.title, "description": c.description,
+        "icon": c.icon, "category": c.category, "difficulty": c.difficulty,
+        "total_videos": c.total_videos, "completed_videos": c.completed_videos,
+        "progress": c.progress, "estimated_hours": c.estimated_hours,
+        "tags": c.tags or [], "video_links": c.video_links or [],
+    }
+
+
+# ── Assessment sessions/results ─────────────────────────────
 
 def save_assessment_session(session: dict):
-    assessments_table.insert(session)
+    db = _session()
+    try:
+        row = AssessmentSession(
+            id=session["id"],
+            student_id=session["student_id"],
+            questions=session.get("questions", []),
+            difficulty=session.get("difficulty", "medium"),
+            time_limit=session.get("time_limit", 420),
+            attention_score_during_video=session.get("attention_score_during_video", 50),
+            transcript_text=session.get("transcript_text"),
+        )
+        db.merge(row)
+        db.commit()
+    finally:
+        db.close()
 
 
 def get_assessment_session(session_id: str) -> Optional[dict]:
-    Q = Query()
-    results = assessments_table.search(Q.id == session_id)
-    return results[0] if results else None
+    db = _session()
+    try:
+        s = db.get(AssessmentSession, session_id)
+        if not s:
+            return None
+        return {
+            "id": s.id, "student_id": s.student_id, "questions": s.questions or [],
+            "difficulty": s.difficulty, "time_limit": s.time_limit,
+            "attention_score_during_video": s.attention_score_during_video,
+            "transcript_text": s.transcript_text,
+        }
+    finally:
+        db.close()
 
 
 def save_assessment_result(result: dict):
-    results_table.insert(result)
+    db = _session()
+    try:
+        known = {"id", "student_id", "session_id", "score", "percentage", "xp_earned", "timestamp"}
+        row = AssessmentResult(
+            id=result.get("id") or f"{result['session_id']}_{result.get('timestamp', '')}",
+            student_id=result["student_id"],
+            session_id=result.get("session_id"),
+            score=result.get("score", result.get("percentage")),
+            percentage=result.get("percentage"),
+            xp_earned=result.get("xp_earned", 0),
+            timestamp=result.get("timestamp", datetime.utcnow().timestamp()),
+            payload={k: v for k, v in result.items() if k not in known},
+        )
+        db.add(row)
+        db.commit()
+    finally:
+        db.close()
 
 
 def get_student_results(student_id: str) -> list[dict]:
-    Q = Query()
-    return results_table.search(Q.student_id == student_id)
+    db = _session()
+    try:
+        rows = db.execute(
+            select(AssessmentResult).where(AssessmentResult.student_id == student_id)
+        ).scalars().all()
+        out = []
+        for r in rows:
+            d = dict(r.payload or {})
+            d.update({
+                "student_id": r.student_id, "session_id": r.session_id,
+                "score": r.score, "percentage": r.percentage,
+                "xp_earned": r.xp_earned, "timestamp": r.timestamp,
+            })
+            out.append(d)
+        return out
+    finally:
+        db.close()
 
 
-# ── Phase 10: persistent CSR history ───────────────────────────────────
-#
-# Design note: one record per assessment holds every component (P, A, I,
-# T, C, CSR, difficulty, explanation), per the implementation spec's
-# Phase 10 requirement ("Each assessment record must permanently store
-# ... Performance ... Attention ... Integrity ... Trend ... Complexity
-# ... Final CSR ... Selected Difficulty ... Adaptive Explanation").
-# The six "history" getters below (performance/attention/integrity/trend/
-# complexity/csr) are projections over this ONE table rather than six
-# separate tables — this avoids duplicating the same timestamp/student_id/
-# assessment_id across six tables and keeps a single source of truth, while
-# still satisfying Phase 11's "GET /<component>/history" endpoints, each of
-# which just needs one field's time series.
+def get_recent_scores_pct(student_id: str, limit: int = 5) -> list[float]:
+    db = _session()
+    try:
+        rows = db.execute(
+            select(AssessmentResult.percentage, AssessmentResult.timestamp)
+            .where(AssessmentResult.student_id == student_id)
+            .order_by(AssessmentResult.timestamp.asc())
+        ).all()
+        return [r[0] for r in rows[-limit:] if r[0] is not None]
+    finally:
+        db.close()
+
+
+# ── CSR history (unchanged shape from legacy — Phase 10/11) ────
 
 def save_csr_record(record: dict) -> dict:
-    """
-    Persist one CSR computation. Expected keys (all required except
-    `assessment_id`, which may be None for pre-assessment / initial-
-    difficulty calls per get_initial_difficulty):
-
-        student_id, assessment_id, timestamp,
-        performance, attention, integrity, trend, complexity,
-        csr, difficulty, explanation
-
-    Returns the same dict (with TinyDB's internal doc_id NOT included —
-    callers should not depend on TinyDB internals).
-    """
     required = {
         "student_id", "timestamp", "performance", "attention", "integrity",
         "trend", "complexity", "csr", "difficulty", "explanation",
@@ -242,41 +232,53 @@ def save_csr_record(record: dict) -> dict:
 
     record = dict(record)
     record.setdefault("assessment_id", None)
-    csr_history_table.insert(record)
-    logger.info(
-        f"CSR persisted: student={record['student_id']} csr={record['csr']:.3f} "
-        f"difficulty={record['difficulty']}"
-    )
+    db = _session()
+    try:
+        row = CSRHistory(**{k: record[k] for k in [
+            "student_id", "assessment_id", "timestamp", "performance",
+            "attention", "integrity", "trend", "complexity", "csr",
+            "difficulty", "explanation",
+        ]})
+        db.add(row)
+        db.commit()
+        logger.info(
+            f"CSR persisted: student={record['student_id']} csr={record['csr']:.3f} "
+            f"difficulty={record['difficulty']}"
+        )
+    finally:
+        db.close()
     return record
 
 
 def get_csr_history(student_id: str, limit: Optional[int] = None) -> list[dict]:
-    """Full CSR history (every component + fused score) for one student,
-    ordered oldest-first. Pass `limit` to get only the most recent N."""
-    Q = Query()
-    records = csr_history_table.search(Q.student_id == student_id)
-    records.sort(key=lambda r: r.get("timestamp", 0))
-    return records[-limit:] if limit else records
+    db = _session()
+    try:
+        rows = db.execute(
+            select(CSRHistory)
+            .where(CSRHistory.student_id == student_id)
+            .order_by(CSRHistory.timestamp.asc())
+        ).scalars().all()
+        records = [{
+            "student_id": r.student_id, "assessment_id": r.assessment_id,
+            "timestamp": r.timestamp, "performance": r.performance,
+            "attention": r.attention, "integrity": r.integrity, "trend": r.trend,
+            "complexity": r.complexity, "csr": r.csr, "difficulty": r.difficulty,
+            "explanation": r.explanation,
+        } for r in rows]
+        return records[-limit:] if limit else records
+    finally:
+        db.close()
 
 
 def get_current_csr(student_id: str) -> Optional[dict]:
-    """Most recent CSR record for a student, or None if they have no history yet."""
     history = get_csr_history(student_id)
     return history[-1] if history else None
 
 
 def _component_history(student_id: str, component: str, limit: Optional[int]) -> list[dict]:
-    """Shared implementation for the five per-component history getters
-    below — each just projects one field out of the full CSR record,
-    keeping {timestamp, assessment_id, value} so the frontend dashboards
-    in Phase 13 can plot a simple time series without extra joins."""
     records = get_csr_history(student_id, limit=limit)
     return [
-        {
-            "timestamp": r["timestamp"],
-            "assessment_id": r.get("assessment_id"),
-            "value": r[component],
-        }
+        {"timestamp": r["timestamp"], "assessment_id": r.get("assessment_id"), "value": r[component]}
         for r in records
     ]
 
@@ -301,163 +303,339 @@ def get_complexity_history(student_id: str, limit: Optional[int] = None) -> list
     return _component_history(student_id, "complexity", limit)
 
 
-def get_recent_scores_pct(student_id: str, limit: int = 5) -> list[float]:
-    """
-    Convenience helper for AdaptiveEngine: pulls recent assessment scores
-    (as percentages) from the DURABLE `results_table`, not the in-memory
-    dict. This is the one change needed in adaptive_engine.py to make
-    Performance (P) and Trend (T) survive a server restart — see
-    ml/adaptive_engine.py's updated `_scores_for()`.
-    """
-    results = get_student_results(student_id)
-    results.sort(key=lambda r: r.get("timestamp", 0))
-    scores = [r["score"] for r in results if "score" in r]
-    return scores[-limit:]
-
-
-def log_attention(log: dict):
-    attention_logs_table.insert(log)
-
-
-def get_attention_logs(video_id: str, student_id: str) -> list[dict]:
-    Q = Query()
-    return attention_logs_table.search(
-        (Q.video_id == video_id) & (Q.student_id == student_id)
-    )
-
-
-# ── Consent (CR6 fix) ─────────────────────────────────────────
-# NeuroLearn only ever stores derived attention *scores*, never raw camera
-# frames — frames are analyzed in-memory per request and discarded (see
-# routers/attention.py). Consent governs whether those derived scores may
-# be captured/logged at all.
+# ── Consent (CR6 fix, now Postgres-backed) ──────────────────
 
 def get_consent(student_id: str) -> Optional[dict]:
-    Q = Query()
-    return consent_table.get(Q.student_id == student_id)
+    db = _session()
+    try:
+        c = db.get(Consent, student_id)
+        if not c:
+            return None
+        return {
+            "student_id": c.student_id, "granted": c.granted,
+            "granted_at": c.granted_at.isoformat() if c.granted_at else None,
+            "retention_days": c.retention_days,
+            "raw_frames_stored": c.raw_frames_stored, "version": c.version,
+        }
+    finally:
+        db.close()
 
 
 def set_consent(record: dict) -> dict:
-    Q = Query()
-    consent_table.upsert(record, Q.student_id == record["student_id"])
+    db = _session()
+    try:
+        granted_at = record.get("granted_at")
+        if isinstance(granted_at, str):
+            granted_at = datetime.fromisoformat(granted_at.replace("Z", "+00:00"))
+        row = Consent(
+            student_id=record["student_id"],
+            granted=record["granted"],
+            granted_at=granted_at or datetime.utcnow(),
+            retention_days=record.get("retention_days", 30),
+            raw_frames_stored=record.get("raw_frames_stored", False),
+            version=record.get("version", "1.0"),
+        )
+        db.merge(row)
+        db.commit()
+    finally:
+        db.close()
     return record
 
 
 def purge_expired_attention_logs() -> int:
-    """
-    Delete attention_logs rows older than the retention window the student
-    consented to (default 30 days, see ConsentGrant.retention_days).
-    Intended to be called on a scheduled job; also safe to call from a
-    startup hook for the prototype. Returns the number of rows removed.
-    """
-    import datetime
-
-    Q = Query()
+    """Delete attention_logs rows older than the retention window the
+    student consented to (default 30 days)."""
+    from datetime import timedelta
+    db = _session()
     removed = 0
-    for consent in consent_table.all():
-        student_id = consent.get("student_id")
-        retention_days = consent.get("retention_days", 30)
-        cutoff = (
-            datetime.datetime.utcnow() - datetime.timedelta(days=retention_days)
-        ).isoformat()
-        stale = attention_logs_table.search(
-            (Q.student_id == student_id) & (Q.timestamp < cutoff)
-        )
-        if stale:
-            attention_logs_table.remove(
-                (Q.student_id == student_id) & (Q.timestamp < cutoff)
-            )
-            removed += len(stale)
+    try:
+        consents = db.execute(select(Consent)).scalars().all()
+        for c in consents:
+            cutoff = (datetime.utcnow() - timedelta(days=c.retention_days)).isoformat()
+            stale = db.execute(
+                select(AttentionLog).where(
+                    AttentionLog.student_id == c.student_id,
+                    AttentionLog.timestamp < cutoff,
+                )
+            ).scalars().all()
+            for row in stale:
+                db.delete(row)
+                removed += 1
+        db.commit()
+    finally:
+        db.close()
     return removed
 
 
-def get_leaderboard() -> list[dict]:
-    return sorted(leaderboard_table.all(), key=lambda x: x.get("rank", 999))
+def log_attention(log: dict):
+    db = _session()
+    try:
+        row = AttentionLog(
+            student_id=log["student_id"], video_id=log.get("video_id"),
+            timestamp=log.get("timestamp"), score=log.get("score"),
+            state=log.get("state"), confidence=log.get("confidence"),
+            message=log.get("message"), model_response=log.get("model_response", {}),
+            source=log.get("source", "dummy"),
+            consent_confirmed=log.get("consent_confirmed", False),
+        )
+        db.add(row)
+        db.commit()
+    finally:
+        db.close()
 
 
-def get_daily_challenges() -> list[dict]:
-    return challenges_table.all()
+def get_attention_logs(video_id: str, student_id: str) -> list[dict]:
+    db = _session()
+    try:
+        rows = db.execute(
+            select(AttentionLog).where(
+                AttentionLog.video_id == video_id, AttentionLog.student_id == student_id
+            )
+        ).scalars().all()
+        return [{
+            "student_id": r.student_id, "video_id": r.video_id, "timestamp": r.timestamp,
+            "score": r.score, "state": r.state, "confidence": r.confidence,
+            "message": r.message, "model_response": r.model_response,
+            "source": r.source, "consent_confirmed": r.consent_confirmed,
+        } for r in rows]
+    finally:
+        db.close()
+
+
+# ── Leaderboard — now a REAL live query, not a static seeded table ────
+# FIX (this request): previously `leaderboard_table` was a hand-seeded
+# TinyDB table of fictional students (Priya Sharma, Marcus Chen, ...)
+# that never changed no matter what any real student did. It is gone —
+# the leaderboard below is computed by ordering the real `users` table.
+
+def get_leaderboard(limit: int = 50) -> list[dict]:
+    db = _session()
+    try:
+        rows = db.execute(
+            select(User).order_by(User.xp.desc()).limit(limit)
+        ).scalars().all()
+        return [
+            {
+                "rank": i + 1,
+                "student_id": u.id,
+                "name": u.name,
+                "avatar": u.avatar or "",
+                "xp": u.xp,
+                "level": u.level,
+                "streak": u.streak,
+                "courses_completed": u.total_courses_completed,
+            }
+            for i, u in enumerate(rows)
+        ]
+    finally:
+        db.close()
+
+
+# ── Daily challenges — now per-student (FIX, remaining-things request) ──
+# Previously get_daily_challenges() returned one global row per
+# challenge with a shared `completed`/`progress` — one student finishing
+# a challenge marked it finished for everyone. Progress now lives in
+# DailyChallengeProgress, scoped to (student_id, challenge_id, today).
+
+def _get_or_create_progress(db: Session, student_id: str, challenge_id: str) -> DailyChallengeProgress:
+    today = date.today()
+    row = db.execute(
+        select(DailyChallengeProgress).where(
+            DailyChallengeProgress.student_id == student_id,
+            DailyChallengeProgress.challenge_id == challenge_id,
+            DailyChallengeProgress.challenge_date == today,
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        row = DailyChallengeProgress(
+            student_id=student_id, challenge_id=challenge_id, challenge_date=today,
+            progress=0, completed=False, xp_awarded=False,
+        )
+        db.add(row)
+        db.flush()
+    return row
+
+
+def get_daily_challenges(student_id: str) -> list[dict]:
+    db = _session()
+    try:
+        templates = db.execute(select(DailyChallenge)).scalars().all()
+        out = []
+        for t in templates:
+            progress_row = _get_or_create_progress(db, student_id, t.id)
+            out.append({
+                "id": t.id, "title": t.title, "description": t.description,
+                "xp_reward": t.xp_reward, "type": t.type, "target": t.target,
+                "progress": progress_row.progress, "completed": progress_row.completed,
+            })
+        db.commit()
+        return out
+    finally:
+        db.close()
+
+
+def advance_challenge_progress(student_id: str, challenge_type: str, amount: int = 1, set_to: Optional[int] = None) -> list[dict]:
+    """
+    Bump progress on every challenge of `challenge_type` for this student
+    today (usually just one, but supports several sharing a type). Caps
+    at the challenge's target and marks completed exactly once; awards
+    XP exactly once per (student, challenge, day) via `xp_awarded`, so
+    calling this multiple times in one day is always safe/idempotent.
+    Returns the list of challenges that just newly completed (empty if
+    none did) so the caller can surface a "+XP" toast.
+    """
+    db = _session()
+    newly_completed = []
+    try:
+        templates = db.execute(
+            select(DailyChallenge).where(DailyChallenge.type == challenge_type)
+        ).scalars().all()
+        for t in templates:
+            row = _get_or_create_progress(db, student_id, t.id)
+            if row.completed:
+                continue
+            row.progress = set_to if set_to is not None else min(row.progress + amount, t.target)
+            if row.progress >= t.target:
+                row.completed = True
+                row.completed_at = datetime.utcnow()
+                if not row.xp_awarded:
+                    user = db.get(User, student_id)
+                    if user:
+                        user.xp += t.xp_reward
+                        if user.xp >= user.xp_to_next_level:
+                            user.xp -= user.xp_to_next_level
+                            user.level += 1
+                            user.xp_to_next_level = int(user.xp_to_next_level * 1.2)
+                    row.xp_awarded = True
+                    newly_completed.append({"id": t.id, "title": t.title, "xp_reward": t.xp_reward})
+        db.commit()
+    finally:
+        db.close()
+    return newly_completed
+
+
+def record_daily_activity(student_id: str) -> dict:
+    """
+    FIX (remaining-things request): `streak`/`best_streak` existed as
+    User columns but nothing ever updated them. Called from the login
+    endpoint (and could be called from any "the student did something
+    today" event): if last_active_date was yesterday, streak += 1; if it
+    was already today, no change (idempotent — logging in twice in a day
+    doesn't inflate the streak); if it was any earlier date (or never),
+    the streak resets to 1. best_streak tracks the historical max.
+    Also advances the "Streak Keeper" daily challenge for today.
+    """
+    db = _session()
+    try:
+        user = db.get(User, student_id)
+        if not user:
+            return {}
+        today = date.today()
+        if user.last_active_date == today:
+            pass  # already recorded today — no-op, not a double-count
+        elif user.last_active_date == today - timedelta(days=1):
+            user.streak += 1
+        else:
+            user.streak = 1
+        user.best_streak = max(user.best_streak, user.streak)
+        user.last_active_date = today
+        db.commit()
+        streak_result = {"streak": user.streak, "best_streak": user.best_streak}
+    finally:
+        db.close()
+    advance_challenge_progress(student_id, "streak", set_to=1)
+    return streak_result
 
 
 def get_notifications(student_id: str = "student_001") -> list[dict]:
-    return notifications_table.all()
+    db = _session()
+    try:
+        rows = db.execute(select(Notification)).scalars().all()
+        return [{
+            "id": n.id, "type": n.type, "title": n.title, "message": n.message,
+            "timestamp": n.timestamp, "read": n.read, "icon": n.icon,
+        } for n in rows]
+    finally:
+        db.close()
 
 
-# ── Auto Courses (add to database.py) ────────────────────────
-
-from tinydb import Query as _Query
+# ── Auto Courses ─────────────────────────────────────────────
 
 def save_auto_course(course_data: dict) -> None:
-    """
-    Persist an auto-generated course (from the scraping pipeline) to DB.
-    Upserts by course_id to avoid duplicates on re-discover.
-    """
-    from data.database import auto_courses_table  # import the new table
-    Q = _Query()
-    course_id = course_data.get("course_id")
-    existing = auto_courses_table.search(Q.course_id == course_id)
-    if existing:
-        auto_courses_table.update(course_data, Q.course_id == course_id)
-    else:
-        auto_courses_table.insert(course_data)
+    db = _session()
+    try:
+        row = AutoCourse(
+            course_id=course_data["course_id"],
+            course_title=course_data.get("course_title"),
+            description=course_data.get("description"),
+            icon=course_data.get("icon"),
+            category=course_data.get("category"),
+            difficulty=course_data.get("difficulty"),
+            tags=course_data.get("tags", []),
+            videos=course_data.get("videos", []),
+            generated_at=course_data.get("generated_at", 0),
+        )
+        db.merge(row)
+        db.commit()
+    finally:
+        db.close()
 
 
-def get_auto_course(course_id: str) -> dict | None:
-    """Retrieve a single auto-generated course by ID."""
-    from data.database import auto_courses_table
-    Q = _Query()
-    results = auto_courses_table.search(Q.course_id == course_id)
-    return results[0] if results else None
+def get_auto_course(course_id: str) -> Optional[dict]:
+    db = _session()
+    try:
+        c = db.get(AutoCourse, course_id)
+        if not c:
+            return None
+        return {
+            "course_id": c.course_id, "course_title": c.course_title,
+            "description": c.description, "icon": c.icon, "category": c.category,
+            "difficulty": c.difficulty, "tags": c.tags or [], "videos": c.videos or [],
+            "generated_at": c.generated_at,
+        }
+    finally:
+        db.close()
 
 
 def get_all_auto_courses() -> list[dict]:
-    """Return all auto-generated courses, newest first."""
-    from data.database import auto_courses_table
-    courses = auto_courses_table.all()
-    return sorted(courses, key=lambda c: c.get("generated_at", 0), reverse=True)
+    db = _session()
+    try:
+        rows = db.execute(select(AutoCourse)).scalars().all()
+        courses = [{
+            "course_id": c.course_id, "course_title": c.course_title,
+            "description": c.description, "icon": c.icon, "category": c.category,
+            "difficulty": c.difficulty, "tags": c.tags or [], "videos": c.videos or [],
+            "generated_at": c.generated_at,
+        } for c in rows]
+        return sorted(courses, key=lambda c: c.get("generated_at", 0), reverse=True)
+    finally:
+        db.close()
 
 
-def update_video_transcription_status(
-    course_id: str,
-    video_id: str,
-    available: bool,
-) -> None:
-    """
-    Mark a video inside an auto course as transcribed.
-    Mutates the `videos` list inside the stored course document.
-    """
-    from data.database import auto_courses_table
-    Q = _Query()
-    course = get_auto_course(course_id)
-    if not course:
-        return
-    updated_videos = []
-    for v in course.get("videos", []):
-        if v.get("id") == video_id:
-            v["transcription_available"] = available
-        updated_videos.append(v)
-    auto_courses_table.update(
-        {"videos": updated_videos},
-        Q.course_id == course_id,
-    )
+def update_video_transcription_status(course_id: str, video_id: str, available: bool) -> None:
+    db = _session()
+    try:
+        c = db.get(AutoCourse, course_id)
+        if not c:
+            return
+        videos = c.videos or []
+        for v in videos:
+            if v.get("id") == video_id:
+                v["transcription_available"] = available
+        c.videos = videos
+        db.commit()
+    finally:
+        db.close()
 
 
-def save_auto_course_to_courses(course_id: str) -> dict | None:
-    """
-    Convert an auto-generated course into the main courses table format.
-    Upserts by id so the saved course appears in dashboard/video flows.
-    """
+def save_auto_course_to_courses(course_id: str) -> Optional[dict]:
     auto_course = get_auto_course(course_id)
     if not auto_course:
         return None
 
     def _to_title_case_difficulty(value: str) -> str:
         normalized = (value or "Intermediate").strip().lower()
-        mapping = {
-            "beginner": "Beginner",
-            "intermediate": "Intermediate",
-            "advanced": "Advanced",
-        }
+        mapping = {"beginner": "Beginner", "intermediate": "Intermediate", "advanced": "Advanced"}
         return mapping.get(normalized, "Intermediate")
 
     videos = auto_course.get("videos", [])
@@ -472,6 +650,9 @@ def save_auto_course_to_courses(course_id: str) -> dict | None:
             "order": int(video.get("order", idx)),
             "completed": bool(video.get("completed", False)),
             "watched_percent": float(video.get("watched_percent", 0.0) or 0.0),
+            # FIX (course generator request): was silently dropped here —
+            # same class of bug as an undeclared response_model field.
+            "stage_label": video.get("stage_label", ""),
         })
 
     total_videos = len(converted_videos)
@@ -495,10 +676,227 @@ def save_auto_course_to_courses(course_id: str) -> dict | None:
         "video_links": converted_videos,
     }
 
-    Q = Query()
-    if courses_table.search(Q.id == course_doc["id"]):
-        courses_table.update(course_doc, Q.id == course_doc["id"])
-    else:
-        courses_table.insert(course_doc)
+    db = _session()
+    try:
+        row = Course(**course_doc)
+        db.merge(row)
+        db.commit()
+    finally:
+        db.close()
 
     return course_doc
+
+
+# ── Refresh tokens (remaining-things request) ────────────────
+# FIX: access tokens previously had no revocation mechanism — logging
+# out only meant "the browser forgot the token", nothing server-side
+# actually invalidated it. Refresh tokens are stored as a SHA-256 hash
+# (never the raw value) and can be revoked for real.
+
+def create_refresh_token(student_id: str, token_hash: str, expires_at: datetime) -> None:
+    db = _session()
+    try:
+        db.add(RefreshToken(user_id=student_id, token_hash=token_hash, expires_at=expires_at))
+        db.commit()
+    finally:
+        db.close()
+
+
+def get_valid_refresh_token(token_hash: str) -> Optional[dict]:
+    db = _session()
+    try:
+        row = db.execute(
+            select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+        ).scalar_one_or_none()
+        if row is None or row.revoked or row.expires_at < datetime.utcnow():
+            return None
+        return {"id": row.id, "user_id": row.user_id, "expires_at": row.expires_at}
+    finally:
+        db.close()
+
+
+def revoke_refresh_token(token_hash: str) -> None:
+    db = _session()
+    try:
+        row = db.execute(
+            select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+        ).scalar_one_or_none()
+        if row:
+            row.revoked = True
+            db.commit()
+    finally:
+        db.close()
+
+
+def revoke_all_refresh_tokens(student_id: str) -> int:
+    """Used by 'log out everywhere' / password reset (rotating the
+    password should kill every existing session, not just the current
+    device's)."""
+    db = _session()
+    try:
+        rows = db.execute(
+            select(RefreshToken).where(
+                RefreshToken.user_id == student_id, RefreshToken.revoked == False  # noqa: E712
+            )
+        ).scalars().all()
+        for row in rows:
+            row.revoked = True
+        db.commit()
+        return len(rows)
+    finally:
+        db.close()
+
+
+# ── Password reset (remaining-things request) ────────────────
+# FIX: there was no password reset flow at all before this.
+
+def create_password_reset_token(student_id: str, token_hash: str, expires_at: datetime) -> None:
+    db = _session()
+    try:
+        # Invalidate any earlier unused reset tokens for this user first
+        # — only the most recently requested link should ever work.
+        old = db.execute(
+            select(PasswordResetToken).where(
+                PasswordResetToken.user_id == student_id, PasswordResetToken.used == False  # noqa: E712
+            )
+        ).scalars().all()
+        for row in old:
+            row.used = True
+        db.add(PasswordResetToken(user_id=student_id, token_hash=token_hash, expires_at=expires_at))
+        db.commit()
+    finally:
+        db.close()
+
+
+def get_valid_password_reset_token(token_hash: str) -> Optional[dict]:
+    db = _session()
+    try:
+        row = db.execute(
+            select(PasswordResetToken).where(PasswordResetToken.token_hash == token_hash)
+        ).scalar_one_or_none()
+        if row is None or row.used or row.expires_at < datetime.utcnow():
+            return None
+        return {"id": row.id, "user_id": row.user_id}
+    finally:
+        db.close()
+
+
+def mark_password_reset_token_used(token_hash: str) -> None:
+    db = _session()
+    try:
+        row = db.execute(
+            select(PasswordResetToken).where(PasswordResetToken.token_hash == token_hash)
+        ).scalar_one_or_none()
+        if row:
+            row.used = True
+            db.commit()
+    finally:
+        db.close()
+
+
+def set_user_password(student_id: str, new_hashed_password: str) -> None:
+    db = _session()
+    try:
+        user = db.get(User, student_id)
+        if user:
+            user.hashed_password = new_hashed_password
+            db.commit()
+    finally:
+        db.close()
+
+
+# ── Seeding ──────────────────────────────────────────────────
+# Global demo content (courses, daily challenges, notifications) is
+# seeded so the app isn't empty on first run. Student accounts are NOT
+# seeded here — they're created for real via POST /api/auth/signup (see
+# scripts/seed_demo_accounts.py for a script that does exactly that, so
+# the leaderboard has real, auth-created rows to show on a fresh demo).
+
+def seed_database():
+    db = _session()
+    try:
+        if db.execute(select(Course).limit(1)).first() is None:
+            _seed_courses(db)
+        if db.execute(select(DailyChallenge).limit(1)).first() is None:
+            _seed_challenges(db)
+        if db.execute(select(Notification).limit(1)).first() is None:
+            _seed_notifications(db)
+        db.commit()
+        logger.success("Postgres seed check complete (courses/challenges/notifications)")
+    finally:
+        db.close()
+
+
+def _seed_courses(db: Session):
+    courses = [
+        {
+            "id": "course_001", "title": "Introduction to React",
+            "description": "Master the fundamentals of React including components, props, state, and hooks",
+            "icon": "⚛️", "category": "Frontend", "difficulty": "Beginner",
+            "total_videos": 8, "completed_videos": 5, "progress": 65, "estimated_hours": 6,
+            "tags": ["React", "JavaScript", "Frontend"],
+            "video_links": [
+                {"id": "v1", "title": "What is React? — Introduction & Setup", "url": "https://www.youtube.com/watch?v=SqcY0GlETPk", "duration": 720, "thumbnail": "", "order": 1, "completed": True, "watched_percent": 100},
+                {"id": "v2", "title": "JSX & Components Deep Dive", "url": "https://www.youtube.com/watch?v=9YkUCRr3bVc", "duration": 890, "thumbnail": "", "order": 2, "completed": True, "watched_percent": 100},
+                {"id": "v3", "title": "Props & Data Flow", "url": "https://www.youtube.com/watch?v=PHaECbrKgs0", "duration": 650, "thumbnail": "", "order": 3, "completed": True, "watched_percent": 100},
+                {"id": "v4", "title": "State & useState Hook", "url": "https://www.youtube.com/watch?v=O6P86uwfdR0", "duration": 780, "thumbnail": "", "order": 4, "completed": True, "watched_percent": 100},
+                {"id": "v5", "title": "useEffect & Side Effects", "url": "https://www.youtube.com/watch?v=0ZJgIjIuY7U", "duration": 920, "thumbnail": "", "order": 5, "completed": True, "watched_percent": 100},
+                {"id": "v6", "title": "Event Handling & Forms", "url": "https://www.youtube.com/watch?v=dH6i3GurZW8", "duration": 640, "thumbnail": "", "order": 6, "completed": False, "watched_percent": 35},
+                {"id": "v7", "title": "Conditional Rendering", "url": "https://www.youtube.com/watch?v=4oCVDkb_peY", "duration": 540, "thumbnail": "", "order": 7, "completed": False, "watched_percent": 0},
+                {"id": "v8", "title": "Lists & Keys", "url": "https://www.youtube.com/watch?v=0sasRxl35_8", "duration": 480, "thumbnail": "", "order": 8, "completed": False, "watched_percent": 0},
+            ],
+        },
+        {
+            "id": "course_002", "title": "Advanced State Management",
+            "description": "Redux, Context API, Zustand and modern state patterns",
+            "icon": "🔄", "category": "Frontend", "difficulty": "Intermediate",
+            "total_videos": 6, "completed_videos": 2, "progress": 42, "estimated_hours": 8,
+            "tags": ["Redux", "Context API", "Zustand"],
+            "video_links": [
+                {"id": "v9", "title": "Why State Management Matters", "url": "https://www.youtube.com/watch?v=CVpUuw9XSjY", "duration": 600, "thumbnail": "", "order": 1, "completed": True, "watched_percent": 100},
+                {"id": "v10", "title": "Context API Fundamentals", "url": "https://www.youtube.com/watch?v=5LrDIWkK_Bc", "duration": 750, "thumbnail": "", "order": 2, "completed": True, "watched_percent": 100},
+                {"id": "v11", "title": "Redux Toolkit Setup", "url": "https://www.youtube.com/watch?v=9zySeP5vH9c", "duration": 880, "thumbnail": "", "order": 3, "completed": False, "watched_percent": 20},
+                {"id": "v12", "title": "Redux Thunk & Async", "url": "https://www.youtube.com/watch?v=93p3LxR9xfM", "duration": 920, "thumbnail": "", "order": 4, "completed": False, "watched_percent": 0},
+                {"id": "v13", "title": "Zustand — Lightweight Alternative", "url": "https://www.youtube.com/watch?v=_ngCLZ5Iz-0", "duration": 680, "thumbnail": "", "order": 5, "completed": False, "watched_percent": 0},
+                {"id": "v14", "title": "State Architecture Patterns", "url": "https://www.youtube.com/watch?v=HKU24nY8Hsc", "duration": 700, "thumbnail": "", "order": 6, "completed": False, "watched_percent": 0},
+            ],
+        },
+        {
+            "id": "course_003", "title": "Performance Optimization",
+            "description": "React.memo, useMemo, code splitting, lazy loading, and profiling",
+            "icon": "⚡", "category": "Frontend", "difficulty": "Advanced",
+            "total_videos": 5, "completed_videos": 1, "progress": 28, "estimated_hours": 5,
+            "tags": ["Performance", "Optimization", "React"],
+            "video_links": [
+                {"id": "v15", "title": "React Performance Basics", "url": "https://www.youtube.com/watch?v=b1IQI4aJHLM", "duration": 800, "thumbnail": "", "order": 1, "completed": True, "watched_percent": 100},
+                {"id": "v16", "title": "React.memo & useMemo", "url": "https://www.youtube.com/watch?v=THL1OPn72vo", "duration": 700, "thumbnail": "", "order": 2, "completed": False, "watched_percent": 40},
+                {"id": "v17", "title": "Code Splitting & Lazy Loading", "url": "https://www.youtube.com/watch?v=JU6sl_yyZqs", "duration": 650, "thumbnail": "", "order": 3, "completed": False, "watched_percent": 0},
+                {"id": "v18", "title": "Profiler & DevTools", "url": "https://www.youtube.com/watch?v=LfEkP0bpFLc", "duration": 600, "thumbnail": "", "order": 4, "completed": False, "watched_percent": 0},
+                {"id": "v19", "title": "Real-world Optimization Case Study", "url": "https://www.youtube.com/watch?v=i8xbddI2Mg8", "duration": 900, "thumbnail": "", "order": 5, "completed": False, "watched_percent": 0},
+            ],
+        },
+    ]
+    for course in courses:
+        db.merge(Course(**course))
+    logger.info(f"Seeded {len(courses)} courses")
+
+
+def _seed_challenges(db: Session):
+    challenges = [
+        {"id": "dc1", "title": "Watch 30 minutes", "description": "Watch any video for 30 minutes", "xp_reward": 50, "type": "watch", "target": 30},
+        {"id": "dc2", "title": "Perfect Quiz", "description": "Score 100% on any quiz", "xp_reward": 100, "type": "quiz", "target": 1},
+        {"id": "dc3", "title": "Streak Keeper", "description": "Log in and study today", "xp_reward": 25, "type": "streak", "target": 1},
+        {"id": "dc4", "title": "Review Master", "description": "Review 3 completed lessons", "xp_reward": 75, "type": "review", "target": 3},
+    ]
+    for c in challenges:
+        db.merge(DailyChallenge(**c))
+    logger.info("Seeded daily challenges")
+
+
+def _seed_notifications(db: Session):
+    notifs = [
+        {"id": "n1", "type": "achievement", "title": "Welcome to NeuroLearn!", "message": "Create your account to start earning XP", "timestamp": "just now", "read": False, "icon": "🎉"},
+    ]
+    for n in notifs:
+        db.merge(Notification(**n))
+    logger.info("Seeded notifications")

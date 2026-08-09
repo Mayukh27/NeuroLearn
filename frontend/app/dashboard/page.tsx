@@ -41,7 +41,13 @@ export default function DashboardPage() {
       fetchCourses(),
       fetchStudentProfile(),
       fetchDailyChallenges(),
-      fetchCsrHistory("student_001", 10).catch(() => []), // isolated: no CSR history yet shouldn't block the dashboard
+      // FIX (auth request): this used to hardcode "student_001" directly,
+      // bypassing the real-user default now built into fetchCsrHistory's
+      // signature. Backend enforces student_id === the authenticated
+      // caller anyway (403 otherwise), so passing anything else would
+      // just fail — omit the argument entirely and let it resolve to the
+      // real logged-in user.
+      fetchCsrHistory(undefined, 10).catch(() => []), // isolated: no CSR history yet shouldn't block the dashboard
     ])
       .then(([c, s, ch, csr]) => {
         const localSaved = getLocallySavedCourses()

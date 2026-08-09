@@ -120,6 +120,14 @@ function VideoCard({ video, index }: { video: DiscoveredVideo; index: number }) 
 
       {/* Info */}
       <div className="flex-1 min-w-0">
+        {/* FIX (course generator request): surfaces which curriculum
+            stage this video was chosen for, so it's visible in the UI
+            that a course spans levels instead of repeating one. */}
+        {video.stageLabel && (
+          <span className="inline-block mb-1 text-[10px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-violet-500/15 text-violet-400">
+            {video.stageLabel}
+          </span>
+        )}
         <p className="text-sm font-medium text-[var(--text-primary)] line-clamp-2 leading-snug">
           {video.title}
         </p>

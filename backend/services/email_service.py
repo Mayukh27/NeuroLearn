@@ -36,6 +36,38 @@ def is_email_configured() -> bool:
     return bool(SMTP_USER and SMTP_PASSWORD)
 
 
+def send_plain_email(to_email: str, subject: str, body_text: str) -> dict:
+    """
+    Generic transactional email — used by password reset. Kept separate
+    from send_report_email() (which is PDF-attachment-specific) rather
+    than overloading that function's signature.
+
+    Returns: { "success": bool, "message": str }
+    """
+    if not is_email_configured():
+        logger.warning("SMTP not configured — email not sent")
+        return {
+            "success": False,
+            "message": "Email not configured. Set SMTP_USER and SMTP_PASSWORD environment variables.",
+        }
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = f"{SMTP_FROM_NAME} <{SMTP_USER}>"
+        msg["To"] = to_email
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body_text, "plain"))
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+
+        return {"success": True, "message": f"Email sent to {to_email}"}
+    except Exception as ex:
+        logger.error(f"Failed to send email: {ex}")
+        return {"success": False, "message": str(ex)}
+
+
 def send_report_email(
     to_email: str,
     student_name: str,

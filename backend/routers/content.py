@@ -56,6 +56,11 @@ class VideoSummary(BaseModel):
     channel: str
     assessment_available: bool
     transcription_available: bool
+    # FIX (course generator request): which curriculum stage this video
+    # was chosen for (Fundamentals/Core Concepts/Intermediate/Advanced/
+    # Applied Project) — without this the frontend has no way to show
+    # that the course actually spans levels rather than repeating one.
+    stage_label: str = ""
 
 
 class DiscoverResponse(BaseModel):
@@ -67,6 +72,9 @@ class DiscoverResponse(BaseModel):
     total_found: int
     status: str
     elapsed_seconds: float
+    # FIX (course generator request): which stages actually got at least
+    # one video — lets the UI/caller detect a still-too-narrow course.
+    stages_covered: list[str] = []
 
 
 class FullPipelineRequest(BaseModel):

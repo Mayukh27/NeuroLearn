@@ -6,7 +6,7 @@ import { fetchStudentProfile, type StudentProfile } from "@/lib/api"
 
 export default function AssessmentLayout({ children }: { children: React.ReactNode }) {
   const [student, setStudent] = useState<StudentProfile | null>(null)
-  useEffect(() => { fetchStudentProfile().then(setStudent) }, [])
+  useEffect(() => { fetchStudentProfile().then(setStudent).catch(() => {}) }, [])
 
   return (
     <div className="min-h-screen bg-[var(--bg-primary)] flex">

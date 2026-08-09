@@ -1,9 +1,11 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import { useRouter } from "next/navigation"
 import { motion, AnimatePresence } from "framer-motion"
 import { Bell, Search, Zap, Flame, ChevronDown } from "lucide-react"
 import { fetchNotifications, type Notification } from "@/lib/api"
+import { logout } from "@/lib/auth"
 
 interface NavbarProps {
   studentName: string
@@ -14,6 +16,7 @@ interface NavbarProps {
 }
 
 export default function Navbar({ studentName, level, xp, xpToNextLevel, streak }: NavbarProps) {
+  const router = useRouter()
   const [notifications, setNotifications] = useState<Notification[]>([])
   const [showNotifs, setShowNotifs] = useState(false)
   const [showProfile, setShowProfile] = useState(false)
@@ -21,7 +24,7 @@ export default function Navbar({ studentName, level, xp, xpToNextLevel, streak }
   const xpPercent = Math.round((xp / xpToNextLevel) * 100)
 
   useEffect(() => {
-    fetchNotifications().then(setNotifications)
+    fetchNotifications().then(setNotifications).catch(() => {})
   }, [])
 
   return (
@@ -153,12 +156,24 @@ export default function Navbar({ studentName, level, xp, xpToNextLevel, streak }
                 exit={{ opacity: 0, y: 10, scale: 0.95 }}
                 className="absolute right-0 top-12 w-48 rounded-xl bg-[var(--bg-card)] border border-[var(--border-default)] shadow-2xl shadow-black/40 p-1"
               >
-                {["Profile", "Settings", "Help", "Sign Out"].map((item) => (
+                {[
+                  { label: "Profile", onClick: () => router.push("/profile") },
+                  { label: "Settings", onClick: () => router.push("/profile") },
+                  { label: "Help", onClick: () => {} },
+                  {
+                    label: "Sign Out",
+                    // FIX (auth request): this button previously did
+                    // nothing at all — no onClick handler existed. It now
+                    // actually clears the session and redirects to /login.
+                    onClick: () => logout(),
+                  },
+                ].map((item) => (
                   <button
-                    key={item}
+                    key={item.label}
+                    onClick={item.onClick}
                     className="w-full text-left px-3 py-2 text-sm rounded-lg text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors"
                   >
-                    {item}
+                    {item.label}
                   </button>
                 ))}
               </motion.div>

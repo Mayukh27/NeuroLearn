@@ -31,9 +31,11 @@ from routers import (
     content_router,          # ← NEW: Auto Course Generator
     csr_router,               # ← Phase 11 (NeuroLearn-MCL): CSR read endpoints
 )
+from routers.auth import router as auth_router
 
-# Import database seeding
+# Import database seeding + Postgres init
 from data.database import seed_database
+from data.db import init_db
 
 # Import ML models (for health check)
 from ml import attention_detector, transcription_service, question_generator
@@ -48,7 +50,21 @@ async def lifespan(app: FastAPI):
     logger.info("  NEUROLEARN BACKEND — Starting Up")
     logger.info("=" * 60)
 
-    # Seed database with dummy data
+    # Create Postgres tables if they don't exist yet (replaces the old
+    # TinyDB JSON file — see data/db.py, data/models_orm.py)
+    init_db()
+
+    from auth.security import JWT_SECRET
+    if JWT_SECRET == "dev-only-insecure-secret-change-me":
+        logger.warning(
+            "JWT_SECRET is using the insecure default — set a real random "
+            "value via the JWT_SECRET env var before deploying anywhere "
+            "other than local dev."
+        )
+
+    # Seed global demo content (courses, daily challenges, notifications).
+    # Student accounts are NOT seeded here — see scripts/seed_demo_accounts.py,
+    # which creates them for real via POST /api/auth/signup.
     seed_database()
 
     # Log ML model status
@@ -108,6 +124,7 @@ app.add_middleware(
 
 
 # ── Register Routers ──
+app.include_router(auth_router)        # ← NEW: signup/login/me
 app.include_router(student_router)
 app.include_router(courses_router)
 app.include_router(attention_router)

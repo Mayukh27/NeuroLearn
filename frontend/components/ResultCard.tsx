@@ -164,6 +164,26 @@ export default function ResultCard({ result }: ResultCardProps) {
             </div>
           </div>
 
+          {/* FIX (real XP request): result.totalXp/newLevel/leveledUp are
+              the actual persisted values from the backend (see
+              routers/assessment.py's _apply_xp) — previously nothing on
+              this page reflected whether XP had really been banked, only
+              the per-assessment delta below. A level-up is now visibly
+              celebrated instead of being silently invisible. */}
+          {result.leveledUp && (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ delay: 0.3 }}
+              className="mb-4 flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-amber-500/15 to-orange-500/15 border border-amber-500/30 px-4 py-3"
+            >
+              <span className="text-lg">🎉</span>
+              <p className="text-sm font-semibold text-amber-300">
+                Level up! You're now level {result.newLevel}
+              </p>
+            </motion.div>
+          )}
+
           {/* Stats grid */}
           <motion.div
             initial={{ opacity: 0, y: 20 }}
@@ -173,7 +193,9 @@ export default function ResultCard({ result }: ResultCardProps) {
           >
             <div className="p-3 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)] text-center">
               <p className="text-2xl font-bold text-violet-400">+{result.xpEarned}</p>
-              <p className="text-[10px] text-[var(--text-muted)] mt-0.5">XP Earned</p>
+              <p className="text-[10px] text-[var(--text-muted)] mt-0.5">
+                XP Earned{typeof result.totalXp === "number" ? ` · ${result.totalXp} total` : ""}
+              </p>
             </div>
             <div className="p-3 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)] text-center">
               <p className="text-2xl font-bold text-cyan-400">{result.correctAnswers}/{result.totalQuestions}</p>
@@ -183,6 +205,7 @@ export default function ResultCard({ result }: ResultCardProps) {
               <p className="text-2xl font-bold text-amber-400">{Math.floor(result.timeSpent / 60)}m {result.timeSpent % 60}s</p>
               <p className="text-[10px] text-[var(--text-muted)] mt-0.5">Time</p>
             </div>
+
           </motion.div>
 
           {/* Adaptive feedback */}
