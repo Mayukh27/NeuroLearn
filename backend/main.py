@@ -8,6 +8,7 @@ Docs: http://localhost:8000/docs (Swagger UI)
 ============================================================
 """
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 
@@ -36,6 +37,10 @@ from routers.auth import router as auth_router
 # Import database seeding + Postgres init
 from data.database import seed_database
 from data.db import init_db
+from services.attention_log_purge_scheduler import (
+    attention_log_purge_loop,
+    stop_attention_log_purge,
+)
 
 # Import ML models (for health check)
 from ml import attention_detector, transcription_service, question_generator
@@ -45,6 +50,9 @@ from ml import attention_detector, transcription_service, question_generator
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handle startup and shutdown events."""
+    purge_stop_event: asyncio.Event | None = None
+    purge_task: asyncio.Task | None = None
+
     # ── STARTUP ──
     logger.info("=" * 60)
     logger.info("  NEUROLEARN BACKEND — Starting Up")
@@ -66,6 +74,9 @@ async def lifespan(app: FastAPI):
     # Student accounts are NOT seeded here — see scripts/seed_demo_accounts.py,
     # which creates them for real via POST /api/auth/signup.
     seed_database()
+
+    purge_stop_event = asyncio.Event()
+    purge_task = asyncio.create_task(attention_log_purge_loop(purge_stop_event))
 
     # Log ML model status
     logger.info(f"Behavioral Cue Model:     {'LIVE' if attention_detector.face_mesh else 'DUMMY'}")
