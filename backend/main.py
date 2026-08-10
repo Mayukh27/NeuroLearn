@@ -89,6 +89,7 @@ async def lifespan(app: FastAPI):
 
     # ── SHUTDOWN ──
     logger.info("Shutting down — cleaning up resources...")
+    await stop_attention_log_purge(purge_task, purge_stop_event)
     attention_detector.cleanup()
     logger.info("Shutdown complete.")
 

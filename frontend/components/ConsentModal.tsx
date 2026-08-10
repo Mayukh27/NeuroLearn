@@ -20,16 +20,18 @@
 import { useState } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import { Camera, ShieldCheck, X } from "lucide-react"
+import { getToken } from "@/lib/auth"
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api"
 const RETENTION_DAYS = 30
 
 interface ConsentModalProps {
   studentId: string
+  sessionId: string
   onDecision: (granted: boolean) => void
 }
 
-export default function ConsentModal({ studentId, onDecision }: ConsentModalProps) {
+export default function ConsentModal({ studentId, sessionId, onDecision }: ConsentModalProps) {
   const [submitting, setSubmitting] = useState(false)
 
   const submit = async (granted: boolean) => {
@@ -37,9 +39,13 @@ export default function ConsentModal({ studentId, onDecision }: ConsentModalProp
     try {
       await fetch(`${API_BASE}/attention/consent`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
+        },
         body: JSON.stringify({
           student_id: studentId,
+          session_id: sessionId,
           granted,
           retention_days: RETENTION_DAYS,
           raw_frames_stored: false,

@@ -172,6 +172,7 @@ class AttentionFrameRequest(BaseModel):
     frame_base64: str
     video_id: str
     student_id: str
+    session_id: str
     # FIX (CR6, peer review packet): the backend must not analyze or store
     # a frame without an on-file consent grant for this student. The
     # frontend gates camera start behind the consent modal (see
@@ -185,6 +186,7 @@ class AttentionFrameRequest(BaseModel):
 class ConsentGrant(BaseModel):
     """A student's response to the webcam-monitoring consent prompt."""
     student_id: str
+    session_id: str
     granted: bool
     # What the student was told at the time of consent — kept alongside the
     # grant so a later policy change doesn't retroactively reinterpret an
@@ -196,6 +198,7 @@ class ConsentGrant(BaseModel):
 
 class ConsentStatus(BaseModel):
     student_id: str
+    session_id: Optional[str] = None
     granted: bool
     granted_at: Optional[str] = None
     retention_days: int = 30

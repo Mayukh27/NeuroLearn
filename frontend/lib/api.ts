@@ -350,6 +350,7 @@ export async function fetchVideoById(
 export async function sendAttentionFrame(
   frameBase64: string,
   videoId: string,
+  sessionId: string,
   studentId: string = getCachedUserId() ?? "student_001"
 ): Promise<AttentionSnapshot> {
   return apiFetch<AttentionSnapshot>(
@@ -360,7 +361,13 @@ export async function sendAttentionFrame(
       // consent gate (CR6, peer review packet) 403s — see ConsentModal.tsx,
       // which is what actually gates whether this function should even
       // be called.
-      body: JSON.stringify({ frame_base64: frameBase64, video_id: videoId, student_id: studentId, consent_confirmed: true }),
+      body: JSON.stringify({
+        frame_base64: frameBase64,
+        video_id: videoId,
+        session_id: sessionId,
+        student_id: studentId,
+        consent_confirmed: true,
+      }),
     },
     async () => generateAttentionSnapshot()
   )

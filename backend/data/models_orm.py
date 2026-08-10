@@ -61,7 +61,7 @@ class User(Base):
     # can compute a real consecutive-day streak.
     last_active_date = Column(Date, nullable=True)
 
-    consent = relationship("Consent", back_populates="user", uselist=False)
+    consent = relationship("Consent", back_populates="user")
 
 
 class Course(Base):
@@ -136,8 +136,7 @@ class CRSHistory(Base):
 class Consent(Base):
     """CR6 (peer review packet) — webcam-monitoring consent, one row per user."""
     __tablename__ = "consent"
-    student_id = Column(String, ForeignKey("users.id"), primary_key=True)
-    granted = Column(Boolean, default=False)
+    student_id = Column(String, ForeignKey("users.id"), primary_key=True)`r`n    session_id = Column(String, primary_key=True, default="legacy")`r`n    granted = Column(Boolean, default=False)
     granted_at = Column(DateTime, nullable=True)
     retention_days = Column(Integer, default=30)
     raw_frames_stored = Column(Boolean, default=False)
@@ -150,6 +149,7 @@ class AttentionLog(Base):
     __tablename__ = "attention_logs"
     id = Column(String, primary_key=True, default=_uuid)
     student_id = Column(String, ForeignKey("users.id"), index=True)
+    session_id = Column(String, index=True, nullable=True)
     video_id = Column(String, index=True)
     timestamp = Column(String)
     score = Column(Integer)

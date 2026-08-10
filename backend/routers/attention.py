@@ -46,11 +46,11 @@ router = APIRouter(prefix="/api/attention", tags=["Behavioral Cue"])
 
 
 @router.get("/consent", response_model=ConsentStatus)
-async def get_consent_status(current_user: User = Depends(get_current_user)):
+async def get_consent_status(session_id: str, current_user: User = Depends(get_current_user)):
     """Return the current webcam-monitoring consent status for the authenticated student."""
-    record = get_consent(current_user.id)
+    record = get_consent(current_user.id, session_id)
     if record is None:
-        return ConsentStatus(student_id=current_user.id, granted=False)
+        return ConsentStatus(student_id=current_user.id, session_id=session_id, granted=False)
     return ConsentStatus(**record)
 
 
@@ -69,6 +69,7 @@ async def grant_or_revoke_consent(
     """
     record = {
         "student_id": current_user.id,
+        "session_id": grant.session_id,
         "granted": grant.granted,
         "granted_at": datetime.now(timezone.utc).isoformat(),
         "retention_days": grant.retention_days,
@@ -107,16 +108,21 @@ async def analyze_frame(
         "consent_confirmed": true
     }
     """
-    consent_record = get_consent(current_user.id)
-    consent_on_file = bool(consent_record and consent_record.get("granted"))
+    consent_record = get_consent(current_user.id, request.session_id)
+    consent_on_file = bool(
+        consent_record
+        and consent_record.get("granted")
+        and consent_record.get("session_id") == request.session_id
+    )
 
     if not (request.consent_confirmed and consent_on_file):
         raise HTTPException(
             status_code=403,
             detail=(
                 "Webcam behavioral-cue monitoring requires recorded consent. "
-                "Call POST /api/attention/consent with granted=true first, "
-                "then resend this request with consent_confirmed=true."
+                "Call POST /api/attention/consent with granted=true and the "
+                "current session_id first, then resend this request with the "
+                "same session_id and consent_confirmed=true."
             ),
         )
 
@@ -129,6 +135,7 @@ async def analyze_frame(
     # consented to (see purge_expired_attention_logs / CR6).
     log_attention({
         "video_id": request.video_id,
+        "session_id": request.session_id,
         "student_id": current_user.id,
         **result,
     })

@@ -18,6 +18,7 @@ import { useRef, useState, useEffect, useCallback } from "react"
 import { motion } from "framer-motion"
 import { Camera, CameraOff, AlertTriangle, Wifi, WifiOff } from "lucide-react"
 import ConsentModal from "./ConsentModal"
+import { getToken } from "@/lib/auth"
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api"
 const CAPTURE_INTERVAL_MS = 500 // capture frame every 500ms
@@ -41,6 +42,8 @@ interface CameraFeedProps {
   isVideoPlaying: boolean
   videoId: string
   studentId: string
+  sessionId: string
+  onConsentChange?: (granted: boolean) => void
   onAttentionUpdate?: (snapshot: AttentionSnapshotResponse) => void
 }
 
@@ -93,6 +96,8 @@ export default function CameraFeed({
   isVideoPlaying,
   videoId,
   studentId,
+  sessionId,
+  onConsentChange,
   onAttentionUpdate,
 }: CameraFeedProps) {
   // ── Refs (never stale) ──
@@ -111,6 +116,8 @@ export default function CameraFeed({
   videoIdRef.current = videoId
   const studentIdRef = useRef(studentId)
   studentIdRef.current = studentId
+  const sessionIdRef = useRef(sessionId)
+  sessionIdRef.current = sessionId
 
   // ── UI State ──
   const [isActive, setIsActive] = useState(false)
@@ -136,7 +143,8 @@ export default function CameraFeed({
     ;(async () => {
       try {
         const res = await fetch(
-          `${API_BASE}/attention/consent?student_id=${encodeURIComponent(studentId)}`
+          `${API_BASE}/attention/consent?session_id=${encodeURIComponent(sessionId)}`,
+          { headers: { ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}) } }
         )
         if (!cancelled && res.ok) {
           const data = await res.json()
@@ -151,12 +159,13 @@ export default function CameraFeed({
     return () => {
       cancelled = true
     }
-  }, [studentId])
+  }, [studentId, sessionId])
 
   // ══════════════════════════════════════════════════════════
   // STEP 1: Start webcam — getUserMedia → video.srcObject
   // ══════════════════════════════════════════════════════════
   const startCamera = useCallback(async () => {
+    if (consentGrantedRef.current !== true) return
     setIsLoading(true)
     setError(null)
     cameraReadyRef.current = false
@@ -229,6 +238,18 @@ export default function CameraFeed({
   }, [isActive])
 
   // ══════════════════════════════════════════════════════════
+  const stopCamera = useCallback(() => {
+    console.log("[CameraFeed] Stopping camera")
+    streamRef.current?.getTracks().forEach((t) => t.stop())
+    streamRef.current = null
+    cameraReadyRef.current = false
+    latestFrameRef.current = null
+    if (videoElRef.current) videoElRef.current.srcObject = null
+    if (sendLoopRef.current) clearInterval(sendLoopRef.current)
+    sendLoopRef.current = null
+    setIsActive(false)
+    setIsConnected(false)
+  }, [])
   // STEP 3: Send frame to backend — POST every 2s
   // Runs whenever camera is active (NOT gated on isVideoPlaying,
   // because YouTube/embed videos play inside an iframe and we
@@ -264,12 +285,16 @@ export default function CameraFeed({
 
           const res = await fetch(`${API_BASE}/attention/snapshot`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
+            },
             signal: ctrl.signal,
             body: JSON.stringify({
               frame_base64: frame,
               video_id: videoIdRef.current,
               student_id: studentIdRef.current,
+              session_id: sessionIdRef.current,
               consent_confirmed: true,
             }),
           })
@@ -284,6 +309,12 @@ export default function CameraFeed({
             setLastScore(snap.score)
             callbackRef.current?.(snap)
             delivered = true
+          } else if (res.status === 403) {
+            setConsentGranted(false)
+            consentGrantedRef.current = false
+            onConsentChange?.(false)
+            stopCamera()
+            delivered = true
           }
         } catch (e) {
           // Fetch failed or timed out — fall through
@@ -292,7 +323,7 @@ export default function CameraFeed({
       }
 
       // ── Local fallback — always fires if backend didn't respond ──
-      if (!delivered) {
+      if (!delivered && consentGrantedRef.current === true) {
         setIsConnected(false)
         const dummy = generateLocalDummy()
         console.log("[CameraFeed] Local dummy: score =", dummy.score, "state =", dummy.state)
@@ -317,23 +348,34 @@ export default function CameraFeed({
       }
       console.log("[CameraFeed] Send loop stopped")
     }
-  }, [isActive])
+  }, [isActive, onConsentChange])
 
-  // ══════════════════════════════════════════════════════════
-  // Stop camera
-  // ══════════════════════════════════════════════════════════
-  const stopCamera = useCallback(() => {
-    console.log("[CameraFeed] Stopping camera")
-    streamRef.current?.getTracks().forEach((t) => t.stop())
-    streamRef.current = null
-    cameraReadyRef.current = false
-    latestFrameRef.current = null
-    if (videoElRef.current) videoElRef.current.srcObject = null
-    if (sendLoopRef.current) clearInterval(sendLoopRef.current)
-    sendLoopRef.current = null
-    setIsActive(false)
-    setIsConnected(false)
-  }, [])
+
+  const revokeConsent = useCallback(async () => {
+    stopCamera()
+    setConsentGranted(false)
+    consentGrantedRef.current = false
+    onConsentChange?.(false)
+    try {
+      await fetch(`${API_BASE}/attention/consent`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
+        },
+        body: JSON.stringify({
+          student_id: studentIdRef.current,
+          session_id: sessionIdRef.current,
+          granted: false,
+          retention_days: 30,
+          raw_frames_stored: false,
+          version: "1.0",
+        }),
+      })
+    } catch {
+      // Local revocation still wins: camera and send loop are already stopped.
+    }
+  }, [onConsentChange, stopCamera])
 
   // Auto-start camera when video plays — ONLY if the student has already
   // granted consent (CR6). If consent is undecided, the modal below
@@ -345,9 +387,11 @@ export default function CameraFeed({
   const handleConsentDecision = useCallback(
     (granted: boolean) => {
       setConsentGranted(granted)
+      onConsentChange?.(granted)
       if (granted && isVideoPlaying && !isActive && !error) startCamera()
+      if (!granted) stopCamera()
     },
-    [isVideoPlaying, isActive, error, startCamera]
+    [isVideoPlaying, isActive, error, onConsentChange, startCamera, stopCamera]
   )
 
   // Cleanup on unmount
@@ -383,7 +427,7 @@ export default function CameraFeed({
       {/* Consent gate (CR6) — shown once per undecided student, before any
           getUserMedia call ever happens */}
       {isVideoPlaying && consentChecked && consentGranted === null && (
-        <ConsentModal studentId={studentId} onDecision={handleConsentDecision} />
+        <ConsentModal studentId={studentId} sessionId={sessionId} onDecision={handleConsentDecision} />
       )}
 
       {/* Camera view */}
@@ -460,9 +504,9 @@ export default function CameraFeed({
             {isLoading ? "Starting..." : "Enable Camera"}
           </motion.button>
         ) : (
-          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={stopCamera}
+          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={revokeConsent}
             className="flex-1 px-4 py-2 text-xs font-semibold rounded-xl bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-all">
-            Stop Camera
+            Revoke Camera
           </motion.button>
         )}
       </div>

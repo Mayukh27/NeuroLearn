@@ -328,14 +328,22 @@ def get_complexity_history(student_id: str, limit: Optional[int] = None) -> list
 
 # ── Consent (CR6 fix, now Postgres-backed) ──────────────────
 
-def get_consent(student_id: str) -> Optional[dict]:
+def get_consent(student_id: str, session_id: Optional[str] = None) -> Optional[dict]:
     db = _session()
     try:
-        c = db.get(Consent, student_id)
+        if session_id is None:
+            c = db.execute(
+                select(Consent)
+                .where(Consent.student_id == student_id)
+                .order_by(Consent.granted_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+        else:
+            c = db.get(Consent, {"student_id": student_id, "session_id": session_id})
         if not c:
             return None
         return {
-            "student_id": c.student_id, "granted": c.granted,
+            "student_id": c.student_id, "session_id": c.session_id, "granted": c.granted,
             "granted_at": c.granted_at.isoformat() if c.granted_at else None,
             "retention_days": c.retention_days,
             "raw_frames_stored": c.raw_frames_stored, "version": c.version,
@@ -352,6 +360,7 @@ def set_consent(record: dict) -> dict:
             granted_at = datetime.fromisoformat(granted_at.replace("Z", "+00:00"))
         row = Consent(
             student_id=record["student_id"],
+            session_id=record["session_id"],
             granted=record["granted"],
             granted_at=granted_at or datetime.utcnow(),
             retention_days=record.get("retention_days", 30),
@@ -394,7 +403,8 @@ def log_attention(log: dict):
     db = _session()
     try:
         row = AttentionLog(
-            student_id=log["student_id"], video_id=log.get("video_id"),
+            student_id=log["student_id"], session_id=log.get("session_id"),
+            video_id=log.get("video_id"),
             timestamp=log.get("timestamp"), score=log.get("score"),
             state=log.get("state"), confidence=log.get("confidence"),
             message=log.get("message"), model_response=log.get("model_response", {}),
@@ -417,6 +427,7 @@ def get_attention_logs(video_id: str, student_id: str) -> list[dict]:
         ).scalars().all()
         return [{
             "student_id": r.student_id, "video_id": r.video_id, "timestamp": r.timestamp,
+            "session_id": r.session_id,
             "score": r.score, "state": r.state, "confidence": r.confidence,
             "message": r.message, "model_response": r.model_response,
             "source": r.source, "consent_confirmed": r.consent_confirmed,

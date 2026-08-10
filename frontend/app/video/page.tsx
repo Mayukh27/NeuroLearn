@@ -36,6 +36,13 @@ export default function VideoPage() {
   )
 }
 
+function newWebcamSessionId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `webcam_${crypto.randomUUID()}`
+  }
+  return `webcam_${Date.now()}_${Math.random().toString(16).slice(2)}`
+}
+
 function VideoContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -51,6 +58,8 @@ function VideoContent() {
   const [videoEnded, setVideoEnded] = useState(false)
   const [customUrl, setCustomUrl] = useState("")
   const [showCustomInput, setShowCustomInput] = useState(false)
+  const [webcamSessionId, setWebcamSessionId] = useState(() => newWebcamSessionId())
+  const [behavioralCueGranted, setBehavioralCueGranted] = useState<boolean | null>(null)
 
   // Behavioral Cue state
   const [latestAttention, setLatestAttention] = useState<AttentionSnapshotResponse | null>(null)
@@ -59,6 +68,9 @@ function VideoContent() {
 
   const effectiveUrl = selectedVideo?.url || customUrl || ""
   const effectiveTitle = selectedVideo?.title || (customUrl ? "Custom Video" : "Select a video")
+  const effectiveBehavioralCue = behavioralCueGranted === false || attentionHistory.length === 0
+    ? 50
+    : sessionAvgAttention
 
   // Load course
   useEffect(() => {
@@ -128,6 +140,8 @@ function VideoContent() {
     setAttentionHistory([])
     setLatestAttention(null)
     setSessionAvgAttention(0)
+    setBehavioralCueGranted(null)
+    setWebcamSessionId(newWebcamSessionId())
     setCustomUrl("")
     setShowCustomInput(false)
   }, [])
@@ -140,27 +154,30 @@ function VideoContent() {
     setVideoEnded(false)
     setAttentionHistory([])
     setLatestAttention(null)
+    setSessionAvgAttention(0)
+    setBehavioralCueGranted(null)
+    setWebcamSessionId(newWebcamSessionId())
     setShowCustomInput(false)
   }
 
   const goToAssessment = () => {
     // Build behavioral_cue summary to thread through to report card
     const attentionSummary = {
-      avgScore: Math.round(sessionAvgAttention * 10) / 10,
+      avgScore: Math.round(effectiveBehavioralCue * 10) / 10,
       scoreHistory: attentionHistory.slice(-40),
       totalSnapshots: attentionHistory.length,
       attentivePercent: Math.round((attentionHistory.filter(s => s >= 65).length / Math.max(attentionHistory.length, 1)) * 100),
       inattentivePercent: Math.round((attentionHistory.filter(s => s >= 30 && s < 65).length / Math.max(attentionHistory.length, 1)) * 100),
       unfocusedPercent: Math.round((attentionHistory.filter(s => s < 30).length / Math.max(attentionHistory.length, 1)) * 100),
-      avgEyeContact: latestAttention?.modelResponse?.eyeContact ?? 0.8,
-      avgBlinkRate: latestAttention?.modelResponse?.blinkRate ?? 16,
+      avgEyeContact: behavioralCueGranted === false ? 0.5 : latestAttention?.modelResponse?.eyeContact ?? 0.8,
+      avgBlinkRate: behavioralCueGranted === false ? 0 : latestAttention?.modelResponse?.blinkRate ?? 16,
     }
     const params = new URLSearchParams({
       course: course?.id || "custom",
       video: selectedVideo?.id || "custom",
       courseTitle: course?.title || "Custom Video",
       videoTitle: selectedVideo?.title || "Video Session",
-      behavioral_cue: Math.round(sessionAvgAttention).toString(),
+      behavioral_cue: Math.round(effectiveBehavioralCue).toString(),
       attentionData: JSON.stringify(attentionSummary),
     })
     router.push(`/assessment?${params.toString()}`)
@@ -246,7 +263,7 @@ function VideoContent() {
                     <h3 className="text-base font-bold text-[var(--text-primary)] mb-1">Ready for Assessment!</h3>
                     <p className="text-xs text-[var(--text-muted)] mb-3">
                       Your average behavioral-cue score was{" "}
-                      <span className="font-bold text-violet-400">{Math.round(sessionAvgAttention)}%</span>.
+                      <span className="font-bold text-violet-400">{Math.round(effectiveBehavioralCue)}%</span>.
                       Based on this and the video content, we&apos;ll generate a personalized quiz.
                     </p>
                     <div className="flex items-center gap-3">
@@ -263,7 +280,7 @@ function VideoContent() {
                 </div>
                 <div className="grid grid-cols-3 gap-3 mt-4 pt-4 border-t border-violet-500/15">
                   <div className="text-center">
-                    <p className="text-lg font-bold text-[var(--text-primary)]">{Math.round(sessionAvgAttention)}%</p>
+                    <p className="text-lg font-bold text-[var(--text-primary)]">{Math.round(effectiveBehavioralCue)}%</p>
                     <p className="text-[10px] text-[var(--text-muted)]">Avg Behavioral Cue</p>
                   </div>
                   <div className="text-center">
@@ -299,6 +316,15 @@ function VideoContent() {
             isVideoPlaying={isPlaying}
             videoId={selectedVideo?.id || "custom"}
             studentId="student_001"
+            sessionId={webcamSessionId}
+            onConsentChange={(granted) => {
+              setBehavioralCueGranted(granted)
+              if (!granted) {
+                setLatestAttention(null)
+                setAttentionHistory([])
+                setSessionAvgAttention(0)
+              }
+            }}
             onAttentionUpdate={handleAttentionUpdate}
           />
           <AttentionPanel

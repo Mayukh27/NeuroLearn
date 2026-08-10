@@ -119,6 +119,7 @@ def upgrade() -> None:
     op.create_table('attention_logs',
     sa.Column('id', sa.String(), nullable=False),
     sa.Column('student_id', sa.String(), nullable=True),
+    sa.Column('session_id', sa.String(), nullable=True),
     sa.Column('video_id', sa.String(), nullable=True),
     sa.Column('timestamp', sa.String(), nullable=True),
     sa.Column('score', sa.Integer(), nullable=True),
@@ -132,16 +133,18 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_attention_logs_student_id'), 'attention_logs', ['student_id'], unique=False)
+    op.create_index(op.f('ix_attention_logs_session_id'), 'attention_logs', ['session_id'], unique=False)
     op.create_index(op.f('ix_attention_logs_video_id'), 'attention_logs', ['video_id'], unique=False)
     op.create_table('consent',
     sa.Column('student_id', sa.String(), nullable=False),
+    sa.Column('session_id', sa.String(), nullable=False),
     sa.Column('granted', sa.Boolean(), nullable=True),
     sa.Column('granted_at', sa.DateTime(), nullable=True),
     sa.Column('retention_days', sa.Integer(), nullable=True),
     sa.Column('raw_frames_stored', sa.Boolean(), nullable=True),
     sa.Column('version', sa.String(), nullable=True),
     sa.ForeignKeyConstraint(['student_id'], ['users.id'], ),
-    sa.PrimaryKeyConstraint('student_id')
+    sa.PrimaryKeyConstraint('student_id', 'session_id')
     )
     op.create_table('crs_history',
     sa.Column('id', sa.String(), nullable=False),
@@ -219,6 +222,7 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_crs_history_student_id'), table_name='crs_history')
     op.drop_table('crs_history')
     op.drop_table('consent')
+    op.drop_index(op.f('ix_attention_logs_session_id'), table_name='attention_logs')
     op.drop_index(op.f('ix_attention_logs_video_id'), table_name='attention_logs')
     op.drop_index(op.f('ix_attention_logs_student_id'), table_name='attention_logs')
     op.drop_table('attention_logs')
