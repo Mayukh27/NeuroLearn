@@ -346,7 +346,7 @@ export async function fetchVideoById(
 // ATTENTION — Camera frame → ML model → score
 // ============================================================
 
-/** POST /api/attention/snapshot — Send camera frame, get attention score */
+/** POST /api/attention/snapshot — Send camera frame, get behavioral-cue score */
 export async function sendAttentionFrame(
   frameBase64: string,
   videoId: string,
@@ -454,31 +454,31 @@ export interface AssessmentSession {
   }
 }
 
-export interface CsrComponents {
+export interface CrsComponents {
   performance: number
-  attention: number
+  behavioralCue: number
   integrity: number
   trend: number
   complexity: number
 }
 
-export interface CsrBlock {
+export interface CrsBlock {
   score: number
   scorePct: number
-  components: CsrComponents
+  components: CrsComponents
   weightsUsed: Record<string, number>
   explanation: string
 }
 
-export interface CsrHistoryEntry {
+export interface CrsHistoryEntry {
   timestamp: number
   assessmentId: string | null
   performance: number
-  attention: number
+  behavioralCue: number
   integrity: number
   trend: number
   complexity: number
-  csr: number
+  crs: number
   difficulty: "easy" | "medium" | "hard"
   explanation: string
 }
@@ -512,15 +512,15 @@ export interface AssessmentResult {
     strengthAreas: string[]
     weakAreas: string[]
     // Phase 11/13 addition (NeuroLearn-MCL): present once the backend has
-    // CSR_CONFIG.csr_enabled=True (the default). Optional so older cached
+    // CRS_CONFIG.crs_enabled=True (the default). Optional so older cached
     // results / the legacy-engine fallback path don't break existing UI.
-    csr?: CsrBlock
+    crs?: CrsBlock
   }
 }
 
 /**
  * POST /api/assessment/generate
- * Sends attention score + transcript to backend.
+ * Sends behavioral-cue score + transcript to backend.
  * Backend adaptive engine picks difficulty, FLAN-T5 generates questions.
  */
 export async function generateAssessment(
@@ -555,7 +555,7 @@ export async function generateAssessment(
       }
       if (attentionScore < 40 && difficulty !== "easy") {
         difficulty = "easy"
-        reason += ` | Low attention (${attentionScore}%) → easy`
+        reason += ` | Low behavioral_cue (${attentionScore}%) → easy`
       }
 
       const questions = QUESTION_BANK[difficulty].slice(0, 5)
@@ -617,25 +617,25 @@ export async function submitAssessment(
 
       const msg = pct >= 90 ? "Outstanding! You've mastered this." : pct >= 70 ? "Well done! Solid understanding." : pct >= 50 ? "Decent effort. Review weak areas." : "Keep practicing! Rewatch the video."
 
-      // Dummy CSR (NeuroLearn-MCL): mirrors the backend's CSR shape so
-      // CSRPanel/CSRTrendWidget render identically whether the backend is
+      // Dummy CRS (NeuroLearn-MCL): mirrors the backend's CRS shape so
+      // CRSPanel/CRSTrendWidget render identically whether the backend is
       // reachable or not — same dual-fallback philosophy as every other
       // function in this file, not a separate code path to maintain.
       const timeRatio = timeSpent / 420 // matches the medium-difficulty default in generateAssessment's fallback; submitAssessment isn't passed the actual session time_limit
       const integrityDummy = timeRatio < 0.15 || timeRatio > 1 ? 0.15 : timeRatio < 0.45 || timeRatio > 0.85 ? 0.6 : 1.0
-      const csrComponents: CsrComponents = {
+      const crsComponents: CrsComponents = {
         performance: pct / 100,
-        attention: 0.7,
+        behavioralCue: 0.7,
         integrity: integrityDummy,
         trend: trend === "improving" ? 0.75 : trend === "declining" ? 0.25 : 0.5,
         complexity: 0.5,
       }
-      const csrScore =
-        0.2 * csrComponents.performance +
-        0.2 * csrComponents.attention +
-        0.2 * csrComponents.integrity +
-        0.2 * csrComponents.trend +
-        0.2 * csrComponents.complexity
+      const crsScore =
+        0.2 * crsComponents.performance +
+        0.2 * crsComponents.behavioralCue +
+        0.2 * crsComponents.integrity +
+        0.2 * crsComponents.trend +
+        0.2 * crsComponents.complexity
 
       return {
         sessionId,
@@ -657,12 +657,12 @@ export async function submitAssessment(
           nextAssessmentDifficulty: nextDiff,
           strengthAreas: correct >= 3 ? ["Core Concepts", "Syntax"] : ["Basic Recognition"],
           weakAreas: correct < 3 ? ["Applied Knowledge", "Deep Understanding"] : [],
-          csr: {
-            score: csrScore,
-            scorePct: Math.round(csrScore * 1000) / 10,
-            components: csrComponents,
+          crs: {
+            score: crsScore,
+            scorePct: Math.round(crsScore * 1000) / 10,
+            components: crsComponents,
             weightsUsed: { alpha: 0.2, beta: 0.2, gamma: 0.2, delta: 0.2, epsilon: 0.2 },
-            explanation: "Offline estimate — backend unreachable, showing locally-computed CSR.",
+            explanation: "Offline estimate — backend unreachable, showing locally-computed CRS.",
           },
         },
       }
@@ -671,56 +671,56 @@ export async function submitAssessment(
 }
 
 // ============================================================
-// COGNITIVE READINESS SCORE (CSR) — NeuroLearn-MCL, Phase 13
+// COGNITIVE READINESS SCORE (CRS) — NeuroLearn-MCL, Phase 13
 // ============================================================
 
-function dummyCsrHistory(studentId: string): CsrHistoryEntry[] {
+function dummyCrsHistory(studentId: string): CrsHistoryEntry[] {
   // Plausible, clearly-offline-looking demo history — same purpose as the
-  // other DUMMY_* fixtures in dummyDb.ts: lets every CSR-aware component
+  // other DUMMY_* fixtures in dummyDb.ts: lets every CRS-aware component
   // render meaningfully with no backend running at all.
   const now = Date.now() / 1000
   const base = [0.42, 0.51, 0.58, 0.63, 0.7]
-  return base.map((csr, i) => ({
+  return base.map((crs, i) => ({
     timestamp: now - (base.length - i) * 86400,
     assessmentId: `demo_session_${i}`,
-    performance: Math.min(1, csr + 0.05),
-    attention: 0.7,
+    performance: Math.min(1, crs + 0.05),
+    behavioralCue: 0.7,
     integrity: i === 1 ? 0.4 : 0.9, // one dip, so the trend widget shows it's a real signal, not a flat line
-    trend: csr,
+    trend: crs,
     complexity: 0.5,
-    csr,
-    difficulty: csr > 0.75 ? "hard" : csr >= 0.45 ? "medium" : "easy",
+    crs,
+    difficulty: crs > 0.75 ? "hard" : crs >= 0.45 ? "medium" : "easy",
     explanation: "Offline demo history — backend unreachable.",
   }))
 }
 
-/** GET /api/csr/{student_id} */
-export async function fetchCurrentCsr(
+/** GET /api/crs/{student_id} */
+export async function fetchCurrentCrs(
   studentId: string = getCachedUserId() ?? "student_001"
-): Promise<CsrHistoryEntry | null> {
-  return apiFetch<CsrHistoryEntry | null>(
-    `/csr/${studentId}`,
+): Promise<CrsHistoryEntry | null> {
+  return apiFetch<CrsHistoryEntry | null>(
+    `/crs/${studentId}`,
     { method: "GET" },
     async () => {
       await delay(150)
-      const history = dummyCsrHistory(studentId)
+      const history = dummyCrsHistory(studentId)
       return history[history.length - 1] ?? null
     }
   )
 }
 
-/** GET /api/csr/{student_id}/history */
-export async function fetchCsrHistory(
+/** GET /api/crs/{student_id}/history */
+export async function fetchCrsHistory(
   studentId: string = getCachedUserId() ?? "student_001",
   limit?: number
-): Promise<CsrHistoryEntry[]> {
+): Promise<CrsHistoryEntry[]> {
   const query = limit ? `?limit=${limit}` : ""
-  return apiFetch<{ history: CsrHistoryEntry[] }>(
-    `/csr/${studentId}/history${query}`,
+  return apiFetch<{ history: CrsHistoryEntry[] }>(
+    `/crs/${studentId}/history${query}`,
     { method: "GET" },
     async () => {
       await delay(200)
-      return { history: dummyCsrHistory(studentId) } as any
+      return { history: dummyCrsHistory(studentId) } as any
     }
   ).then((res: any) => res.history ?? res)
 }
@@ -765,7 +765,7 @@ export interface ReportPayload {
   course: { title: string; id: string }
   video: { title: string; id: string; duration: number }
   assessment: AssessmentResult
-  attention: {
+  behavioral_cue: {
     avgScore: number
     scoreHistory: number[]
     totalSnapshots: number

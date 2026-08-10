@@ -6,7 +6,7 @@ from .assessment import router as assessment_router
 from .gamification import router as gamification_router
 from .report import router as report_router
 from .content import router as content_router          # ← NEW
-from .csr import router as csr_router                   # ← Phase 11 (NeuroLearn-MCL)
+from .crs import router as crs_router                   # ← Phase 11 (NeuroLearn-MCL)
 
 __all__ = [
     "student_router",
@@ -17,5 +17,5 @@ __all__ = [
     "gamification_router",
     "report_router",
     "content_router",                                  # ← NEW
-    "csr_router",                                       # ← Phase 11 (NeuroLearn-MCL)
+    "crs_router",                                       # ← Phase 11 (NeuroLearn-MCL)
 ]

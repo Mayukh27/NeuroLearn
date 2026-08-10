@@ -1,8 +1,8 @@
 """
-backend/config/csr_config.py
+backend/config/crs_config.py
 
-Central, externalized configuration for the Cognitive Readiness Score (CSR)
-and the modules that feed it. Nothing in ml/csr.py or its component modules
+Central, externalized configuration for the Cognitive Readiness Score (CRS)
+and the modules that feed it. Nothing in ml/crs.py or its component modules
 should hardcode a weight, threshold, or window size — it should be read from
 here, so the values can later become trainable / tunable without touching
 module code.
@@ -19,11 +19,11 @@ from typing import Dict
 
 
 @dataclass(frozen=True)
-class CSRWeights:
+class CRSWeights:
     """
-    CSR = alpha*P + beta*A + gamma*I + delta*T + epsilon*C
+    CRS = alpha*P + beta*B + gamma*I + delta*T + epsilon*C
 
-    All five weights must sum to 1.0 so that CSR remains a clean convex
+    All five weights must sum to 1.0 so that CRS remains a clean convex
     combination of five [0,1]-normalized component scores (per the peer
     review packet's "Concrete Fixes" §14 recommendation).
 
@@ -32,7 +32,7 @@ class CSRWeights:
     nothing here should be reported as "tuned" until backed by real data.
     """
     alpha: float = 0.20  # Performance (P)
-    beta: float = 0.20   # Attention (A)
+    beta: float = 0.20   # Behavioral Cue (B)
     gamma: float = 0.20  # Response Integrity (I)
     delta: float = 0.20  # Learning Trend (T)
     epsilon: float = 0.20  # Content Complexity (C)
@@ -44,7 +44,7 @@ class CSRWeights:
         total = self.alpha + self.beta + self.gamma + self.delta + self.epsilon
         if abs(total - 1.0) > 1e-6:
             raise ValueError(
-                f"CSR weights must sum to 1.0, got {total:.6f}. "
+                f"CRS weights must sum to 1.0, got {total:.6f}. "
                 f"Weights: {self.as_dict()}"
             )
 
@@ -52,11 +52,11 @@ class CSRWeights:
 @dataclass(frozen=True)
 class DifficultyThresholds:
     """
-    CSR -> difficulty tier mapping, per the implementation spec (Phase 9):
+    CRS -> difficulty tier mapping, per the implementation spec (Phase 9):
 
-        CSR > hard_threshold        -> "hard"
+        CRS > hard_threshold        -> "hard"
         medium_threshold..hard      -> "medium"
-        CSR < medium_threshold      -> "easy"
+        CRS < medium_threshold      -> "easy"
     """
     medium_threshold: float = 0.45
     hard_threshold: float = 0.75
@@ -98,10 +98,10 @@ class IntegrityConfig:
     # (very likely a rushed/guessed response, regardless of correctness).
     very_fast_ratio: float = 0.15
     # Above this ratio, integrity score is also penalized (very likely
-    # disengagement, distraction, or the student walked away mid-question).
+    # extended inactivity, distraction, or the student walked away mid-question).
     very_slow_ratio: float = 1.0  # = used the full time limit or more
     # Floor for the integrity score at the extremes (never exactly 0 —
-    # a single timing data point should never zero out a student's CSR).
+    # a single timing data point should never zero out a student's CRS).
     min_integrity: float = 0.15
 
 
@@ -125,14 +125,14 @@ class ComplexityConfig:
     technical_density_weight: float = 0.35
     sentence_length_weight: float = 0.20
     # Score assigned when no transcript text is available at all (neutral —
-    # absence of a complexity signal should not silently push CSR toward
+    # absence of a complexity signal should not silently push CRS toward
     # "easy" or "hard").
     default_complexity: float = 0.5
 
 
 @dataclass(frozen=True)
-class CSRConfig:
-    weights: CSRWeights = field(default_factory=CSRWeights)
+class CRSConfig:
+    weights: CRSWeights = field(default_factory=CRSWeights)
     thresholds: DifficultyThresholds = field(default_factory=DifficultyThresholds)
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
     integrity: IntegrityConfig = field(default_factory=IntegrityConfig)
@@ -141,7 +141,7 @@ class CSRConfig:
     # Feature flag: lets adaptive_engine.py fall back to the legacy rule
     # cascade if ever needed (e.g. for A/B comparison, or while components
     # are still being validated), without deleting the old code path.
-    csr_enabled: bool = True
+    crs_enabled: bool = True
 
     def validate(self) -> None:
         self.weights.validate()
@@ -150,5 +150,5 @@ class CSRConfig:
 
 # Module-level singleton — import this, don't re-instantiate, so that any
 # future move to a YAML/env-driven config only changes this one spot.
-CSR_CONFIG = CSRConfig()
-CSR_CONFIG.validate()
+CRS_CONFIG = CRSConfig()
+CRS_CONFIG.validate()

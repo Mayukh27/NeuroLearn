@@ -14,16 +14,16 @@ backend/
 ├── routers/
 │   ├── student.py          # Student profile, XP, badges
 │   ├── courses.py          # Course listing, video links
-│   ├── attention.py        # Camera attention monitoring
+│   ├── attention.py        # Camera behavioral-cue monitoring
 │   ├── transcription.py    # Video transcription (Whisper)
 │   ├── assessment.py       # Quiz generation + submission
 │   └── gamification.py     # Leaderboard, challenges, notifications
 │
 ├── ml/
-│   ├── attention_model.py  # MediaPipe face mesh → attention score
+│   ├── attention_model.py  # MediaPipe face mesh → behavioral-cue score
 │   ├── transcription_model.py # Whisper → transcript segments
 │   ├── question_generator.py  # FLAN-T5 → quiz questions
-│   └── adaptive_engine.py  # Score + attention → next difficulty
+│   └── adaptive_engine.py  # Score + behavioral cue → next difficulty
 │
 └── data/
     └── database.py         # TinyDB dummy database + seed data
@@ -63,7 +63,7 @@ Camera + Transcript Collection
   ├── Camera frames → POST /api/attention/snapshot
   │     → MediaPipe Face Mesh
   │     → Eye tracking + Head pose + Blink rate
-  │     → Attention score (0-100) + State (attentive/inattentive/unfocused)
+  │     → Behavioral Cue score (0-100) + State (attentive/inattentive/unfocused)
   │
   └── Audio → POST /api/transcription/chunk
         → OpenAI Whisper
@@ -118,14 +118,14 @@ field, and should state the live/dummy mix explicitly rather than
 presenting all samples as equivalent. Check `GET /health` for which
 models were loaded at server start.
 
-## Consent & Data Retention (attention monitoring)
+## Consent & Data Retention (behavioral-cue monitoring)
 
 **FIX (CR6, peer review packet):** `/api/attention/snapshot` is
 consent-gated. A student must have an on-file `granted=true` record
 (`POST /api/attention/consent`) before any frame is analyzed, and the
 request itself must carry `consent_confirmed=true`. Declining does not
-penalize CSR — `ml/csr.py` defaults the Attention (A) component to a
-neutral 0.5 when no attention score is supplied, so opting out only
+penalize CRS — `ml/crs.py` defaults the Behavioral Cue (B) component to a
+neutral 0.5 when no behavioral-cue score is supplied, so opting out only
 removes a potential signal, it never forces a lower readiness score or a
 harder/easier tier. Raw camera frames are analyzed in memory and are
 never persisted — only the derived numeric score and sub-metrics are
@@ -141,7 +141,7 @@ human-subjects deployment additionally requires.
 ## Key API Endpoints
 
 
-### Attention Monitoring
+### Behavioral Cue Monitoring
 ```bash
 # With camera frame
 curl -X POST http://localhost:8000/api/attention/snapshot \
@@ -216,5 +216,4 @@ export async function fetchAttentionScore(frameBase64: string): Promise<Attentio
   return res.json();
 }
 ```
-
 

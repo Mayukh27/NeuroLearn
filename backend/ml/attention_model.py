@@ -14,10 +14,10 @@ try:
     import cv2
     import mediapipe as mp
     ML_AVAILABLE = True
-    logger.info("OpenCV + MediaPipe loaded — attention model LIVE")
+    logger.info("OpenCV + MediaPipe loaded — behavioral_cue model LIVE")
 except ImportError:
     ML_AVAILABLE = False
-    logger.warning("OpenCV/MediaPipe not installed — using DUMMY attention model")
+    logger.warning("OpenCV/MediaPipe not installed — using DUMMY behavioral_cue model")
 
 
 class AttentionDetector:
@@ -30,7 +30,7 @@ class AttentionDetector:
     # Nose tip, chin, left eye corner, right eye corner, left mouth, right mouth
     FACE_POSE_POINTS = [1, 152, 33, 263, 61, 291]
 
-    # Attention thresholds
+    # Behavioral Cue thresholds
     ATTENTIVE_THRESHOLD = 65
     INATTENTIVE_THRESHOLD = 30
 
@@ -40,17 +40,17 @@ class AttentionDetector:
             "Excellent focus! You're fully engaged.",
             "Great concentration! Keep it up.",
             "You're doing amazing — stay locked in!",
-            "Perfect attention. You're absorbing this well.",
+            "Perfect behavioral_cue. You're absorbing this well.",
         ],
         "inattentive": [
-            "Looks like your attention is drifting. Try refocusing.",
+            "Looks like your behavioral_cue is drifting. Try refocusing.",
             "You seem a bit distracted. The key point is coming up!",
             "Hey, try to stay with the content — you've got this!",
             "A quick stretch might help you refocus.",
         ],
         "unfocused": [
             "You seem unfocused. Consider taking a short break.",
-            "Your attention is very low. Pause and stretch if needed.",
+            "Your behavioral_cue is very low. Pause and stretch if needed.",
             "Try closing other tabs and refocusing on the video.",
             "Take a 2-minute break, then come back refreshed!",
         ],
@@ -209,7 +209,7 @@ class AttentionDetector:
         """
         Main analysis pipeline.
         Input: base64 camera frame
-        Output: JSON-serializable attention snapshot
+        Output: JSON-serializable behavioral_cue snapshot
         """
         self.frame_count += 1
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -258,7 +258,7 @@ class AttentionDetector:
         # 4. Head pose
         head_pose = self._compute_head_pose(landmarks, w, h)
 
-        # ── Aggregate attention score ──
+        # ── Aggregate behavioral_cue score ──
         # Head pose is steadier than iris tracking on low-resolution webcam frames.
         head_score = {"forward": 1.0, "slightly_away": 0.65, "away": 0.2}[head_pose]
         eye_open_score = max(

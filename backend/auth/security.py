@@ -99,7 +99,7 @@ def get_current_user(
     Resolves the authenticated user from the Authorization: Bearer <token>
     header. Raises 401 if missing/invalid/expired, or if the user no
     longer exists. Every personal/mutating endpoint (profile, XP award,
-    assessment submit, attention snapshot, consent) depends on this
+    assessment submit, behavioral-cue snapshot, consent) depends on this
     instead of trusting a client-supplied student_id — the original code
     let any caller read or write any student's data by simply passing a
     different student_id, which this closes.

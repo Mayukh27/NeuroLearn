@@ -6,7 +6,7 @@ Per the implementation spec (Phase 4): "Reuse the existing MediaPipe
 implementation. Do NOT rewrite it." This module does not reimplement
 EAR/gaze/head-pose math — it only exposes the sub-scores that
 analyze_frame() already computes internally but doesn't surface separately,
-plus a normalized [0,1] view of the overall attention score for CSR.
+plus a normalized [0,1] view of the overall behavioral_cue score for CRS.
 
 attention_model.analyze_frame() currently returns:
     {
@@ -45,7 +45,7 @@ _BLINK_TOLERANCE = 15.0
 
 @dataclass(frozen=True)
 class AttentionSubscores:
-    attention_score: float  # [0,1] — normalized overall score (for CSR)
+    attention_score: float  # [0,1] — normalized overall score (for CRS)
     attention_score_pct: float  # 0-100, same as analyze_frame()["score"]
     gaze_score: float  # [0,1]
     head_pose_score: float  # [0,1]
@@ -67,7 +67,7 @@ def derive_subscores(attention_snapshot: Dict) -> AttentionSubscores:
 
     Returns:
         AttentionSubscores with attention_score normalized to [0,1] for
-        direct use as the "A" component of CSR.
+        direct use as the "A" component of CRS.
     """
     model_response = attention_snapshot.get("model_response", {})
 
@@ -100,8 +100,8 @@ def derive_subscores(attention_snapshot: Dict) -> AttentionSubscores:
 def rolling_average_attention(recent_scores_pct: list[float]) -> float:
     """
     Helper for callers that have a short history of recent per-frame/per-
-    session attention percentages (0-100) and want a single [0,1] value
-    for CSR (e.g. average attention across an entire video-watching
+    session behavioral_cue percentages (0-100) and want a single [0,1] value
+    for CRS (e.g. average behavioral_cue across an entire video-watching
     session, rather than a single frame).
     """
     if not recent_scores_pct:

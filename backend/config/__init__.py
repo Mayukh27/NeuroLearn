@@ -1,1 +1,1 @@
-"""Configuration package for NeuroLearn backend (CSR weights, thresholds, etc.)."""
+"""Configuration package for NeuroLearn backend (CRS weights, thresholds, etc.)."""

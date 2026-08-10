@@ -24,7 +24,7 @@ function AssessmentContent() {
   const searchParams = useSearchParams()
   const courseId = searchParams.get("course") || "course_001"
   const videoId = searchParams.get("video") || "v1"
-  const attentionScore = parseFloat(searchParams.get("attention") || "70")
+  const attentionScore = parseFloat(searchParams.get("behavioral_cue") || "70")
   const prevScore = searchParams.get("prev") ? parseFloat(searchParams.get("prev")!) : null
   const attentionDataParam = searchParams.get("attentionData") || ""
   const courseTitleParam = searchParams.get("courseTitle") || "Course"
@@ -113,10 +113,10 @@ function AssessmentContent() {
 
     try {
       const result = await submitAssessment(session.id, ans, session.questions, elapsed)
-      // Navigate to results with all data serialized (including attention for report card)
+      // Navigate to results with all data serialized (including behavioral_cue for report card)
       const params = new URLSearchParams({
         data: JSON.stringify(result),
-        attention: attentionDataParam,
+        behavioral_cue: attentionDataParam,
         course: courseTitleParam,
         video: videoTitleParam,
       })
@@ -173,7 +173,7 @@ function AssessmentContent() {
           Difficulty:{" "}
           <span className="font-semibold capitalize text-violet-400">{session.difficulty}</span>
           {" · "}
-          Attention during video:{" "}
+          Behavioral Cue during video:{" "}
           <span className="font-semibold text-cyan-400">{Math.round(session.attentionScoreDuringVideo)}%</span>
         </p>
         {session.adaptiveMetadata?.reason && (
@@ -216,7 +216,7 @@ function AssessmentContent() {
         transition={{ delay: 0.5 }}
         className="text-center text-[10px] text-[var(--text-muted)] mt-8"
       >
-        💡 Questions adapt based on your video attention and previous performance
+        💡 Questions adapt based on your video behavioral_cue and previous performance
       </motion.p>
     </div>
   )

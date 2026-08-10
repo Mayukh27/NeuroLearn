@@ -21,7 +21,7 @@ const REFRESH_TOKEN_KEY = "neurolearn_refresh_token"
 const USER_ID_KEY = "neurolearn_user_id"
 
 // Small companion to the token: several existing api.ts functions take a
-// `studentId` path parameter (e.g. /api/csr/{student_id}) that predates
+// `studentId` path parameter (e.g. /api/crs/{student_id}) that predates
 // auth and defaulted to the literal string "student_001". The backend
 // now rejects any student_id that isn't the caller's own (403), so those
 // defaults need to resolve to the real logged-in user's id. Rather than

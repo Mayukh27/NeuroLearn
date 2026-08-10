@@ -29,7 +29,7 @@ from routers import (
     gamification_router,
     report_router,
     content_router,          # ← NEW: Auto Course Generator
-    csr_router,               # ← Phase 11 (NeuroLearn-MCL): CSR read endpoints
+    crs_router,               # ← Phase 11 (NeuroLearn-MCL): CRS read endpoints
 )
 from routers.auth import router as auth_router
 
@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI):
     seed_database()
 
     # Log ML model status
-    logger.info(f"Attention Model:     {'LIVE' if attention_detector.face_mesh else 'DUMMY'}")
+    logger.info(f"Behavioral Cue Model:     {'LIVE' if attention_detector.face_mesh else 'DUMMY'}")
     logger.info(f"Transcription Model: {'LIVE' if transcription_service.model else 'DUMMY'}")
     logger.info(f"Question Generator:  {'LIVE' if question_generator.model else 'DUMMY'}")
     logger.info("=" * 60)
@@ -88,14 +88,14 @@ app = FastAPI(
     description=(
         "Adaptive Learning Platform Backend\n\n"
         "**ML Models:**\n"
-        "- Attention Detection (MediaPipe Face Mesh)\n"
+        "- Behavioral Cue Detection (MediaPipe Face Mesh)\n"
         "- Video Transcription (OpenAI Whisper)\n"
         "- Question Generation (FLAN-T5)\n"
         "- Adaptive Difficulty Engine\n\n"
         "**Features:**\n"
         "- Student profiles with gamification (XP, levels, badges)\n"
         "- Course management with video links\n"
-        "- Real-time attention monitoring from webcam\n"
+        "- Real-time behavioral-cue monitoring from webcam\n"
         "- Live video transcription\n"
         "- Adaptive assessments that adjust to student performance\n"
         "- Leaderboard, daily challenges, notifications\n"
@@ -133,7 +133,7 @@ app.include_router(assessment_router)
 app.include_router(gamification_router)
 app.include_router(report_router)
 app.include_router(content_router)     # ← NEW
-app.include_router(csr_router)         # ← Phase 11 (NeuroLearn-MCL)
+app.include_router(crs_router)         # ← Phase 11 (NeuroLearn-MCL)
 
 
 # ── Health Check ──
@@ -181,7 +181,7 @@ async def api_overview():
             },
             "attention": {
                 "POST /api/attention/snapshot": "Analyze camera frame",
-                "GET /api/attention/history": "Get attention logs",
+                "GET /api/attention/history": "Get behavioral-cue logs",
                 "GET /api/attention/dummy-snapshot": "Get dummy data (no camera)",
             },
             "transcription": {

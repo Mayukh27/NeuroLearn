@@ -1,8 +1,8 @@
 """
-backend/tests/test_csr.py
+backend/tests/test_crs.py
 
-Unit tests for the CSR module and its five components. Run with:
-    pytest backend/tests/test_csr.py -v
+Unit tests for the CRS module and its five components. Run with:
+    pytest backend/tests/test_crs.py -v
 
 These intentionally include a direct regression test for CR3 (the peer
 review packet's most important finding): a fast-but-CORRECT response must
@@ -22,8 +22,8 @@ from ml.performance import compute_performance
 from ml.response_integrity import compute_response_integrity, TimingCategory
 from ml.trend import compute_trend
 from ml.content_complexity import compute_content_complexity
-from ml.csr import compute_csr
-from config.csr_config import CSR_CONFIG
+from ml.crs import compute_crs
+from config.crs_config import CRS_CONFIG
 
 
 # ── Performance (P) ──────────────────────────────────────────────────
@@ -32,7 +32,7 @@ def test_performance_no_history_returns_default():
     result = compute_performance(None)
     assert result.window_used == 0
     assert 0.0 <= result.score <= 1.0
-    assert result.score_pct == CSR_CONFIG.performance.default_score_pct
+    assert result.score_pct == CRS_CONFIG.performance.default_score_pct
 
 
 def test_performance_recency_weighting_favors_recent_scores():
@@ -52,7 +52,7 @@ def test_performance_normalized_to_unit_interval():
 def test_integrity_fast_and_correct_is_still_penalized():
     """
     THE CR3 FIX. The legacy rule only flagged fast+wrong; this is the
-    paper's own motivating case (correct-but-guessing) and must now be
+    paper's own motivating case (correct-but-rapid completion) and must now be
     penalized regardless of correctness.
     """
     result = compute_response_integrity(time_spent=5, time_limit=60, was_correct=True)
@@ -123,7 +123,7 @@ def test_trend_rescaling_matches_paper_formula():
 
 def test_complexity_no_transcript_returns_neutral_default():
     result = compute_content_complexity(None)
-    assert result.complexity_score == CSR_CONFIG.complexity.default_complexity
+    assert result.complexity_score == CRS_CONFIG.complexity.default_complexity
 
 
 def test_complexity_simple_text_scores_lower_than_technical_text():
@@ -143,25 +143,25 @@ def test_complexity_score_bounded():
     assert 0.0 <= result.complexity_score <= 1.0
 
 
-# ── CSR fusion (end-to-end) ──────────────────────────────────────────
+# ── CRS fusion (end-to-end) ──────────────────────────────────────────
 
-def test_csr_weights_sum_to_one():
-    w = CSR_CONFIG.weights
+def test_crs_weights_sum_to_one():
+    w = CRS_CONFIG.weights
     assert (w.alpha + w.beta + w.gamma + w.delta + w.epsilon) == pytest.approx(1.0)
 
 
-def test_csr_all_neutral_inputs_lands_in_medium_band():
-    """With every component at a defensible 'neutral' value, CSR should
+def test_crs_all_neutral_inputs_lands_in_medium_band():
+    """With every component at a defensible 'neutral' value, CRS should
     land inside the medium band by construction (not at the extremes)."""
-    result = compute_csr()  # no args at all -> every component defaults
-    assert CSR_CONFIG.thresholds.medium_threshold <= result.csr <= CSR_CONFIG.thresholds.hard_threshold or \
-        result.csr < CSR_CONFIG.thresholds.medium_threshold  # neutral defaults may differ per component; just assert it's a valid, bounded value
-    assert 0.0 <= result.csr <= 1.0
+    result = compute_crs()  # no args at all -> every component defaults
+    assert CRS_CONFIG.thresholds.medium_threshold <= result.crs <= CRS_CONFIG.thresholds.hard_threshold or \
+        result.crs < CRS_CONFIG.thresholds.medium_threshold  # neutral defaults may differ per component; just assert it's a valid, bounded value
+    assert 0.0 <= result.crs <= 1.0
     assert result.difficulty in {"easy", "medium", "hard"}
 
 
-def test_csr_high_performance_high_attention_yields_hard():
-    result = compute_csr(
+def test_crs_high_performance_high_attention_yields_hard():
+    result = compute_crs(
         recent_scores_pct=[95, 96, 97, 98, 99],
         attention_score_pct=95,
         time_spent=36,  # thoughtful pace at a 60s limit
@@ -170,11 +170,11 @@ def test_csr_high_performance_high_attention_yields_hard():
         transcript_text="Advanced asynchronous compiler middleware polymorphism.",
     )
     assert result.difficulty == "hard"
-    assert result.csr > CSR_CONFIG.thresholds.hard_threshold
+    assert result.crs > CRS_CONFIG.thresholds.hard_threshold
 
 
-def test_csr_low_performance_low_attention_yields_easy():
-    result = compute_csr(
+def test_crs_low_performance_low_attention_yields_easy():
+    result = compute_crs(
         recent_scores_pct=[20, 15, 25, 10, 18],
         attention_score_pct=15,
         time_spent=3,
@@ -182,13 +182,13 @@ def test_csr_low_performance_low_attention_yields_easy():
         was_correct=False,
     )
     assert result.difficulty == "easy"
-    assert result.csr < CSR_CONFIG.thresholds.medium_threshold
+    assert result.crs < CRS_CONFIG.thresholds.medium_threshold
 
 
-def test_csr_fast_correct_lowers_csr_versus_thoughtful_correct():
+def test_crs_fast_correct_lowers_crs_versus_thoughtful_correct():
     """End-to-end version of the CR3 regression test: holding performance,
-    attention, trend, and complexity fixed, a fast-correct response must
-    produce a LOWER CSR than a thoughtful-correct response, because the
+    behavioral_cue, trend, and complexity fixed, a fast-correct response must
+    produce a LOWER CRS than a thoughtful-correct response, because the
     integrity component must penalize the fast one."""
     common = dict(
         recent_scores_pct=[80, 82, 81, 83, 84],
@@ -196,16 +196,16 @@ def test_csr_fast_correct_lowers_csr_versus_thoughtful_correct():
         was_correct=True,
         time_limit=60,
     )
-    fast = compute_csr(time_spent=5, **common)
-    thoughtful = compute_csr(time_spent=36, **common)
-    assert fast.csr < thoughtful.csr
+    fast = compute_crs(time_spent=5, **common)
+    thoughtful = compute_crs(time_spent=36, **common)
+    assert fast.crs < thoughtful.crs
     assert fast.components.integrity < thoughtful.components.integrity
 
 
-def test_csr_missing_timing_does_not_penalize_pre_assessment():
+def test_crs_missing_timing_does_not_penalize_pre_assessment():
     """get_initial_difficulty's use case: no time_spent/time_limit yet —
     integrity must default to neutral-maximum, not penalize."""
-    result = compute_csr(recent_scores_pct=[70, 72, 71], attention_score_pct=70)
+    result = compute_crs(recent_scores_pct=[70, 72, 71], attention_score_pct=70)
     assert result.components.integrity == 1.0
 
 

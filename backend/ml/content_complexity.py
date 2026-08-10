@@ -28,7 +28,7 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional
 
-from config.csr_config import CSR_CONFIG, ComplexityConfig
+from config.crs_config import CRS_CONFIG, ComplexityConfig
 
 # Small, illustrative technical-vocabulary seed list. This is intentionally
 # domain-general (CS/STEM leaning, matching NeuroLearn's current dummy
@@ -89,7 +89,7 @@ def _segment_sentences(text: str) -> List[str]:
 def compute_content_complexity(
     transcript_text: Optional[str],
     technical_terms: Optional[set[str]] = None,
-    config: ComplexityConfig = CSR_CONFIG.complexity,
+    config: ComplexityConfig = CRS_CONFIG.complexity,
 ) -> ComplexityResult:
     """
     Compute the Content Complexity (C) component from transcript text.
@@ -98,7 +98,7 @@ def compute_content_complexity(
         transcript_text: the transcript segment(s) the student has watched
             so far. If None/empty, returns a neutral default (per Phase 7's
             "Return ... Complexity Score" requirement, absence of a
-            transcript should not silently bias CSR toward easy or hard).
+            transcript should not silently bias CRS toward easy or hard).
         technical_terms: optional override of the technical-vocabulary set;
             defaults to `_DEFAULT_TECHNICAL_TERMS`.
         config: ComplexityConfig (sub-signal weights, default value).

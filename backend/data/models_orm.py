@@ -117,18 +117,18 @@ class AssessmentResult(Base):
     payload = Column(JSONB, default=dict)  # everything else (message, adaptive_response, etc.)
 
 
-class CSRHistory(Base):
-    __tablename__ = "csr_history"
+class CRSHistory(Base):
+    __tablename__ = "crs_history"
     id = Column(String, primary_key=True, default=_uuid)
     student_id = Column(String, ForeignKey("users.id"), index=True)
     assessment_id = Column(String, nullable=True)
     timestamp = Column(Float)
     performance = Column(Float)
-    attention = Column(Float)
+    behavioral_cue = Column(Float)
     integrity = Column(Float)
     trend = Column(Float)
     complexity = Column(Float)
-    csr = Column(Float)
+    crs = Column(Float)
     difficulty = Column(String)
     explanation = Column(Text)
 

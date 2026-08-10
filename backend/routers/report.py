@@ -91,7 +91,7 @@ class GenerateReportRequest(BaseModel):
     course: ReportCourse = ReportCourse()
     video: ReportVideo = ReportVideo()
     assessment: ReportAssessment = ReportAssessment()
-    attention: ReportAttention = ReportAttention()
+    behavioral_cue: ReportAttention = ReportAttention()
     transcription: ReportTranscription = ReportTranscription()
 
 

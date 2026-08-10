@@ -25,8 +25,9 @@ from data.database import (
     save_assessment_result,
     get_student_results,
     get_recent_scores_pct,
-    save_csr_record,
+    save_crs_record,
     advance_challenge_progress,
+    apply_xp,
 )
 from data.db import get_db
 from data.models_orm import User
@@ -47,20 +48,9 @@ def _apply_xp(user: User, amount: int, db: Session) -> dict:
     leaderboard or the student's level. This is the fix: XP is now
     credited here, in the same transaction as the assessment result.
     """
-    new_xp = user.xp + amount
-    leveled_up = False
-    new_level = user.level
-    xp_to_next = user.xp_to_next_level
-    if new_xp >= xp_to_next:
-        leveled_up = True
-        new_level += 1
-        new_xp -= xp_to_next
-        xp_to_next = int(xp_to_next * 1.2)
-    user.xp = new_xp
-    user.level = new_level
-    user.xp_to_next_level = xp_to_next
+    xp_result = apply_xp(user, amount)
     db.commit()
-    return {"new_xp": new_xp, "new_level": new_level, "leveled_up": leveled_up, "xp_to_next_level": xp_to_next}
+    return xp_result
 
 
 @router.post("/generate", response_model=AssessmentSession)
@@ -74,7 +64,7 @@ async def generate_assessment(
     Flow:
         1. Adaptive engine determines difficulty based on:
            - Previous score
-           - Attention level during video
+           - Behavioral Cue level during video
         2. Question generator (FLAN-T5) creates questions from transcript
         3. Returns assessment session with questions
 
@@ -206,7 +196,7 @@ async def submit_assessment(
     # timing alone, per the CR3 fix), only the human-readable reason string.
     was_correct = percentage >= 50.0
 
-    # Run adaptive engine (CSR-driven — see ml/adaptive_engine.py)
+    # Run adaptive engine (CRS-driven — see ml/adaptive_engine.py)
     adaptive_result = adaptive_engine.determine_difficulty(
         student_id=request.student_id,
         current_score=percentage,
@@ -269,32 +259,32 @@ async def submit_assessment(
             "next_assessment_difficulty": adaptive_result["next_assessment_difficulty"],
             "strength_areas": adaptive_result["strength_areas"],
             "weak_areas": adaptive_result["weak_areas"],
-            # Phase 11 addition: surfaces the full CSR breakdown to the
+            # Phase 11 addition: surfaces the full CRS breakdown to the
             # frontend (Phase 13 dashboards read this same shape).
-            "csr": adaptive_result.get("csr"),
+            "crs": adaptive_result.get("crs"),
         },
     }
 
     # Save result (unchanged — durable assessment_results table)
     save_assessment_result(result)
 
-    # Phase 10: persist the full CSR record as its own durable history
+    # Phase 10: persist the full CRS record as its own durable history
     # entry, independent of the legacy results_table, so each component
     # (P, A, I, T, C) has its own queryable time series.
-    csr_block = adaptive_result.get("csr")
-    if csr_block:
-        save_csr_record({
+    crs_block = adaptive_result.get("crs")
+    if crs_block:
+        save_crs_record({
             "student_id": request.student_id,
             "assessment_id": request.session_id,
             "timestamp": result["timestamp"],
-            "performance": csr_block["components"]["performance"],
-            "attention": csr_block["components"]["attention"],
-            "integrity": csr_block["components"]["integrity"],
-            "trend": csr_block["components"]["trend"],
-            "complexity": csr_block["components"]["complexity"],
-            "csr": csr_block["score"],
+            "performance": crs_block["components"]["performance"],
+            "behavioral_cue": crs_block["components"]["behavioral_cue"],
+            "integrity": crs_block["components"]["integrity"],
+            "trend": crs_block["components"]["trend"],
+            "complexity": crs_block["components"]["complexity"],
+            "crs": crs_block["score"],
             "difficulty": adaptive_result["next_assessment_difficulty"],
-            "explanation": csr_block["explanation"],
+            "explanation": crs_block["explanation"],
         })
 
     return result

@@ -136,10 +136,10 @@ class Course(BaseModel):
     video_links: list[VideoLink]
 
 
-# ── Attention / Camera ──────────────────────────────────────
+# ── Behavioral Cue / Camera ──────────────────────────────────────
 
 class AttentionModelOutput(BaseModel):
-    """Raw JSON output from the attention detection ML model"""
+    """Raw JSON output from the behavioral_cue detection ML model"""
     eye_contact: float = Field(ge=0, le=1)
     eye_open: Optional[float] = Field(default=None, ge=0, le=1)
     eyes_closed_duration: Optional[float] = Field(default=None, ge=0)
@@ -302,8 +302,8 @@ class AdaptiveResponse(BaseModel):
     weak_areas: list[str]
     # Phase 11 addition (additive, Optional — old clients unaffected):
     # full Cognitive Readiness Score breakdown, so the frontend can render
-    # the CSR gauge/component bars in Phase 13 without a second API call.
-    csr: Optional[dict] = None
+    # the CRS gauge/component bars in Phase 13 without a second API call.
+    crs: Optional[dict] = None
 
 
 class AssessmentResult(BaseModel):

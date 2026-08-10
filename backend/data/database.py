@@ -24,9 +24,32 @@ from sqlalchemy.orm import Session
 from data.db import SessionLocal
 from data.models_orm import (
     User, Course, AutoCourse, AssessmentSession, AssessmentResult,
-    CSRHistory, Consent, AttentionLog, DailyChallenge, Notification,
+    CRSHistory, Consent, AttentionLog, DailyChallenge, Notification,
     DailyChallengeProgress, PasswordResetToken, RefreshToken,
 )
+
+XP_PER_LEVEL = 100
+
+
+def level_from_xp(xp: int) -> int:
+    return max(1, int(xp or 0) // XP_PER_LEVEL + 1)
+
+
+def xp_to_next_level(xp: int) -> int:
+    return XP_PER_LEVEL - (int(xp or 0) % XP_PER_LEVEL)
+
+
+def apply_xp(user: User, amount: int) -> dict:
+    before_level = level_from_xp(user.xp)
+    user.xp = max(0, int(user.xp or 0) + int(amount or 0))
+    user.level = level_from_xp(user.xp)
+    user.xp_to_next_level = xp_to_next_level(user.xp)
+    return {
+        "new_xp": user.xp,
+        "new_level": user.level,
+        "leveled_up": user.level > before_level,
+        "xp_to_next_level": user.xp_to_next_level,
+    }
 
 
 def _session() -> Session:
@@ -50,9 +73,9 @@ def _user_to_dict(user: User, db: Session) -> dict:
         "name": user.name,
         "email": user.email,
         "avatar": user.avatar,
-        "level": user.level,
+        "level": level_from_xp(user.xp),
         "xp": user.xp,
-        "xp_to_next_level": user.xp_to_next_level,
+        "xp_to_next_level": xp_to_next_level(user.xp),
         "streak": user.streak,
         "best_streak": user.best_streak,
         "total_courses_completed": user.total_courses_completed,
@@ -219,30 +242,30 @@ def get_recent_scores_pct(student_id: str, limit: int = 5) -> list[float]:
         db.close()
 
 
-# ── CSR history (unchanged shape from legacy — Phase 10/11) ────
+# ── CRS history (unchanged shape from legacy — Phase 10/11) ────
 
-def save_csr_record(record: dict) -> dict:
+def save_crs_record(record: dict) -> dict:
     required = {
-        "student_id", "timestamp", "performance", "attention", "integrity",
-        "trend", "complexity", "csr", "difficulty", "explanation",
+        "student_id", "timestamp", "performance", "behavioral_cue", "integrity",
+        "trend", "complexity", "crs", "difficulty", "explanation",
     }
     missing = required - record.keys()
     if missing:
-        raise ValueError(f"save_csr_record missing required fields: {sorted(missing)}")
+        raise ValueError(f"save_crs_record missing required fields: {sorted(missing)}")
 
     record = dict(record)
     record.setdefault("assessment_id", None)
     db = _session()
     try:
-        row = CSRHistory(**{k: record[k] for k in [
+        row = CRSHistory(**{k: record[k] for k in [
             "student_id", "assessment_id", "timestamp", "performance",
-            "attention", "integrity", "trend", "complexity", "csr",
+            "behavioral_cue", "integrity", "trend", "complexity", "crs",
             "difficulty", "explanation",
         ]})
         db.add(row)
         db.commit()
         logger.info(
-            f"CSR persisted: student={record['student_id']} csr={record['csr']:.3f} "
+            f"CRS persisted: student={record['student_id']} crs={record['crs']:.3f} "
             f"difficulty={record['difficulty']}"
         )
     finally:
@@ -250,19 +273,19 @@ def save_csr_record(record: dict) -> dict:
     return record
 
 
-def get_csr_history(student_id: str, limit: Optional[int] = None) -> list[dict]:
+def get_crs_history(student_id: str, limit: Optional[int] = None) -> list[dict]:
     db = _session()
     try:
         rows = db.execute(
-            select(CSRHistory)
-            .where(CSRHistory.student_id == student_id)
-            .order_by(CSRHistory.timestamp.asc())
+            select(CRSHistory)
+            .where(CRSHistory.student_id == student_id)
+            .order_by(CRSHistory.timestamp.asc())
         ).scalars().all()
         records = [{
             "student_id": r.student_id, "assessment_id": r.assessment_id,
             "timestamp": r.timestamp, "performance": r.performance,
-            "attention": r.attention, "integrity": r.integrity, "trend": r.trend,
-            "complexity": r.complexity, "csr": r.csr, "difficulty": r.difficulty,
+            "behavioral_cue": r.behavioral_cue, "integrity": r.integrity, "trend": r.trend,
+            "complexity": r.complexity, "crs": r.crs, "difficulty": r.difficulty,
             "explanation": r.explanation,
         } for r in rows]
         return records[-limit:] if limit else records
@@ -270,13 +293,13 @@ def get_csr_history(student_id: str, limit: Optional[int] = None) -> list[dict]:
         db.close()
 
 
-def get_current_csr(student_id: str) -> Optional[dict]:
-    history = get_csr_history(student_id)
+def get_current_crs(student_id: str) -> Optional[dict]:
+    history = get_crs_history(student_id)
     return history[-1] if history else None
 
 
 def _component_history(student_id: str, component: str, limit: Optional[int]) -> list[dict]:
-    records = get_csr_history(student_id, limit=limit)
+    records = get_crs_history(student_id, limit=limit)
     return [
         {"timestamp": r["timestamp"], "assessment_id": r.get("assessment_id"), "value": r[component]}
         for r in records
@@ -287,8 +310,8 @@ def get_performance_history(student_id: str, limit: Optional[int] = None) -> lis
     return _component_history(student_id, "performance", limit)
 
 
-def get_attention_history(student_id: str, limit: Optional[int] = None) -> list[dict]:
-    return _component_history(student_id, "attention", limit)
+def get_behavioral_cue_history(student_id: str, limit: Optional[int] = None) -> list[dict]:
+    return _component_history(student_id, "behavioral_cue", limit)
 
 
 def get_integrity_history(student_id: str, limit: Optional[int] = None) -> list[dict]:
@@ -501,11 +524,7 @@ def advance_challenge_progress(student_id: str, challenge_type: str, amount: int
                 if not row.xp_awarded:
                     user = db.get(User, student_id)
                     if user:
-                        user.xp += t.xp_reward
-                        if user.xp >= user.xp_to_next_level:
-                            user.xp -= user.xp_to_next_level
-                            user.level += 1
-                            user.xp_to_next_level = int(user.xp_to_next_level * 1.2)
+                        apply_xp(user, t.xp_reward)
                     row.xp_awarded = True
                     newly_completed.append({"id": t.id, "title": t.title, "xp_reward": t.xp_reward})
         db.commit()

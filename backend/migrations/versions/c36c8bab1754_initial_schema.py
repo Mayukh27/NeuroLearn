@@ -143,23 +143,23 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['student_id'], ['users.id'], ),
     sa.PrimaryKeyConstraint('student_id')
     )
-    op.create_table('csr_history',
+    op.create_table('crs_history',
     sa.Column('id', sa.String(), nullable=False),
     sa.Column('student_id', sa.String(), nullable=True),
     sa.Column('assessment_id', sa.String(), nullable=True),
     sa.Column('timestamp', sa.Float(), nullable=True),
     sa.Column('performance', sa.Float(), nullable=True),
-    sa.Column('attention', sa.Float(), nullable=True),
+    sa.Column('behavioral_cue', sa.Float(), nullable=True),
     sa.Column('integrity', sa.Float(), nullable=True),
     sa.Column('trend', sa.Float(), nullable=True),
     sa.Column('complexity', sa.Float(), nullable=True),
-    sa.Column('csr', sa.Float(), nullable=True),
+    sa.Column('crs', sa.Float(), nullable=True),
     sa.Column('difficulty', sa.String(), nullable=True),
     sa.Column('explanation', sa.Text(), nullable=True),
     sa.ForeignKeyConstraint(['student_id'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
-    op.create_index(op.f('ix_csr_history_student_id'), 'csr_history', ['student_id'], unique=False)
+    op.create_index(op.f('ix_crs_history_student_id'), 'crs_history', ['student_id'], unique=False)
     op.create_table('daily_challenge_progress',
     sa.Column('id', sa.String(), nullable=False),
     sa.Column('student_id', sa.String(), nullable=True),
@@ -216,8 +216,8 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_daily_challenge_progress_challenge_id'), table_name='daily_challenge_progress')
     op.drop_index(op.f('ix_daily_challenge_progress_challenge_date'), table_name='daily_challenge_progress')
     op.drop_table('daily_challenge_progress')
-    op.drop_index(op.f('ix_csr_history_student_id'), table_name='csr_history')
-    op.drop_table('csr_history')
+    op.drop_index(op.f('ix_crs_history_student_id'), table_name='crs_history')
+    op.drop_table('crs_history')
     op.drop_table('consent')
     op.drop_index(op.f('ix_attention_logs_video_id'), table_name='attention_logs')
     op.drop_index(op.f('ix_attention_logs_student_id'), table_name='attention_logs')

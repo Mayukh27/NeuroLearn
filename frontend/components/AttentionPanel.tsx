@@ -71,7 +71,7 @@ export default function AttentionPanel({
       <div className="px-4 py-2.5 border-b border-[var(--border-subtle)] flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Eye size={14} className="text-[var(--text-muted)]" />
-          <span className="text-xs font-semibold text-[var(--text-primary)]">Attention Monitor</span>
+          <span className="text-xs font-semibold text-[var(--text-primary)]">Behavioral Cue Monitor</span>
         </div>
         <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--bg-elevated)] text-[var(--text-muted)] font-mono">
           Avg: {Math.round(sessionAverage)}%

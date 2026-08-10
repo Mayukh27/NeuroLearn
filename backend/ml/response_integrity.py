@@ -7,7 +7,7 @@ FIXES CR3 (peer review packet): the legacy rule in adaptive_engine.py only
 fired when `time_ratio < 0.3 AND current_score < 70` — i.e. it could only
 ever flag "fast + wrong", and the paper's own Introduction motivates this
 component with the opposite, harder case: a learner who answers correctly
-while guessing quickly. A rule gated on low score structurally cannot catch
+while rapid completion quickly. A rule gated on low score structurally cannot catch
 that case. This module computes integrity from timing ALONE, independent
 of correctness, exactly as Phase 5 specifies:
 
@@ -15,9 +15,9 @@ of correctness, exactly as Phase 5 specifies:
     Thoughtful pace -> maximum score
     Very slow       -> penalty
 
-Correctness still matters for CSR overall (that's what the Performance
+Correctness still matters for CRS overall (that's what the Performance
 component P is for) — but it must not be the gate that decides whether
-timing-based guessing is even checked.
+timing-based rapid completion is even checked.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from config.csr_config import CSR_CONFIG, IntegrityConfig
+from config.crs_config import CRS_CONFIG, IntegrityConfig
 
 
 class TimingCategory(str, Enum):
@@ -89,7 +89,7 @@ def compute_response_integrity(
     time_spent: float,
     time_limit: float,
     was_correct: bool,
-    config: IntegrityConfig = CSR_CONFIG.integrity,
+    config: IntegrityConfig = CRS_CONFIG.integrity,
 ) -> IntegrityResult:
     """
     Compute the Response Integrity (I) component from timing alone.
@@ -121,7 +121,7 @@ def compute_response_integrity(
         else:
             reason = (
                 f"Answered incorrectly in {time_ratio:.0%} of the allotted time — "
-                "consistent with rapid guessing."
+                "consistent with rapid rapid completion."
             )
     elif category == TimingCategory.FAST:
         reason = (
@@ -142,7 +142,7 @@ def compute_response_integrity(
     else:  # VERY_SLOW
         reason = (
             f"Took {time_ratio:.0%} of the allotted time (at or beyond the "
-            "limit) — consistent with disengagement or being away from the "
+            "limit) — consistent with extended inactivity or being away from the "
             "screen for part of the question."
         )
 

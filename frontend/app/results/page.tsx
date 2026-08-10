@@ -24,7 +24,7 @@ export default function ResultsPage() {
 function ResultsContent() {
   const searchParams = useSearchParams()
   const dataParam = searchParams.get("data")
-  const attentionParam = searchParams.get("attention")
+  const attentionParam = searchParams.get("behavioral_cue")
   const courseParam = searchParams.get("course")
   const videoParam = searchParams.get("video")
 
@@ -87,7 +87,7 @@ function ResultsContent() {
       course: { title: courseParam || "Introduction to React", id: courseParam || "course_001" },
       video: { title: videoParam || "Video Session", id: videoParam || "video_001", duration: result!.timeSpent * 3 },
       assessment: result!,
-      attention: attn,
+      behavioral_cue: attn,
       transcription: { totalSegments: 15, avgConfidence: 0.932 },
     }
   }, [result, attentionData, courseParam, videoParam, emailAddress])
@@ -174,7 +174,7 @@ function ResultsContent() {
           </div>
           <div>
             <h3 className="text-base font-bold text-[var(--text-primary)]">Report Card</h3>
-            <p className="text-xs text-[var(--text-muted)]">Download or email a detailed PDF with scores, attention charts, and recommendations</p>
+            <p className="text-xs text-[var(--text-muted)]">Download or email a detailed PDF with scores, behavioral-cue charts, and recommendations</p>
           </div>
         </div>
         <div className="flex flex-wrap gap-3">
@@ -212,7 +212,7 @@ function ResultsContent() {
               ) : (
                 <>
                   <p className="text-xs text-[var(--text-muted)] mb-4">
-                    Enter the email address to receive the full PDF report card with assessment scores, attention metrics, graphical analysis, and adaptive recommendations.
+                    Enter the email address to receive the full PDF report card with assessment scores, behavioral-cue metrics, graphical analysis, and adaptive recommendations.
                   </p>
                   <input type="email" value={emailAddress} onChange={(e) => setEmailAddress(e.target.value)}
                     placeholder="student@example.com"
@@ -238,7 +238,7 @@ function ResultsContent() {
 }
 
 function generateTextReport(data: any): string {
-  const a = data.assessment, attn = data.attention, ar = a.adaptiveResponse || {}
+  const a = data.assessment, attn = data.behavioral_cue, ar = a.adaptiveResponse || {}
   return `
 NEUROLEARN REPORT CARD
 ===================================

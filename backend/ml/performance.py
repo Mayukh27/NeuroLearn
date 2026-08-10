@@ -4,7 +4,7 @@ backend/ml/performance.py
 Performance (P) component of the Cognitive Readiness Score.
 
 P is a recency-weighted rolling average of recent assessment scores,
-normalized to [0,1]. This is intentionally the simplest of the five CSR
+normalized to [0,1]. This is intentionally the simplest of the five CRS
 components — it formalizes what `current_score` already meant informally
 in the legacy adaptive_engine.py rule cascade, but as a proper windowed
 average rather than a single most-recent score.
@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
-from config.csr_config import CSR_CONFIG, PerformanceConfig
+from config.crs_config import CRS_CONFIG, PerformanceConfig
 
 
 @dataclass(frozen=True)
@@ -28,7 +28,7 @@ class PerformanceResult:
 
 def compute_performance(
     recent_scores_pct: Optional[Sequence[float]] = None,
-    config: PerformanceConfig = CSR_CONFIG.performance,
+    config: PerformanceConfig = CRS_CONFIG.performance,
 ) -> PerformanceResult:
     """
     Compute the Performance (P) component.

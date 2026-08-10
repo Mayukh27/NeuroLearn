@@ -1,7 +1,7 @@
 """
-backend/ml/csr.py
+backend/ml/crs.py
 
-Cognitive Readiness Score (CSR) — Phase 2 of the implementation spec.
+Cognitive Readiness Score (CRS) — Phase 2 of the implementation spec.
 
 FIXES CR1 (peer review packet): the decision logic previously lived in
 adaptive_engine.py as a rule cascade (score baseline +/-1 integer
@@ -9,13 +9,13 @@ modifiers, clamped to 3 tiers) — there was no normalized [0,1] readiness
 value and no weights alpha..epsilon anywhere in code, despite both
 appearing in the paper's Eq. (1), Fig. 2, and Table II.
 
-    CSR = alpha*P + beta*A + gamma*I + delta*T + epsilon*C
+    CRS = alpha*P + beta*A + gamma*I + delta*T + epsilon*C
 
 This module is the single place that combines the five component modules
 (performance, attention_subscores, response_integrity, trend,
-content_complexity) into one CSR value, a difficulty recommendation, and a
+content_complexity) into one CRS value, a difficulty recommendation, and a
 human-readable explanation — exactly the three things Phase 2 specifies
-`compute_csr()` must return, plus the component breakdown.
+`compute_crs()` must return, plus the component breakdown.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from typing import Optional, Sequence
 
-from config.csr_config import CSR_CONFIG, CSRConfig
+from config.crs_config import CRS_CONFIG, CRSConfig
 from ml.performance import compute_performance, PerformanceResult
 from ml.response_integrity import compute_response_integrity, IntegrityResult
 from ml.trend import compute_trend, TrendResult
@@ -31,10 +31,10 @@ from ml.content_complexity import compute_content_complexity, ComplexityResult
 
 
 @dataclass(frozen=True)
-class CSRComponents:
-    """Raw [0,1] value of each of the five CSR inputs, for transparency/logging."""
+class CRSComponents:
+    """Raw [0,1] value of each of the five CRS inputs, for transparency/logging."""
     performance: float
-    attention: float
+    behavioral_cue: float
     integrity: float
     trend: float
     complexity: float
@@ -44,28 +44,28 @@ class CSRComponents:
 
 
 @dataclass(frozen=True)
-class CSRResult:
-    csr: float  # [0,1] — the fused Cognitive Readiness Score
-    csr_pct: float  # same value as 0-100, for display
+class CRSResult:
+    crs: float  # [0,1] — the fused Cognitive Readiness Score
+    crs_pct: float  # same value as 0-100, for display
     difficulty: str  # "easy" | "medium" | "hard"
-    components: CSRComponents
+    components: CRSComponents
     weights_used: dict
     explanation: str
     # Full detail from each component module, for debugging/history storage —
     # NOT required by every caller, but cheap to carry and very useful for
-    # the GET /csr and GET /difficulty/reason endpoints planned in Phase 11.
+    # the GET /crs and GET /difficulty/reason endpoints planned in Phase 11.
     detail: dict
 
 
-def _difficulty_from_csr(csr: float, config: CSRConfig) -> str:
-    if csr > config.thresholds.hard_threshold:
+def _difficulty_from_crs(crs: float, config: CRSConfig) -> str:
+    if crs > config.thresholds.hard_threshold:
         return "hard"
-    if csr >= config.thresholds.medium_threshold:
+    if crs >= config.thresholds.medium_threshold:
         return "medium"
     return "easy"
 
 
-def compute_csr(
+def compute_crs(
     *,
     recent_scores_pct: Optional[Sequence[float]] = None,
     attention_score_pct: Optional[float] = None,
@@ -73,12 +73,12 @@ def compute_csr(
     time_limit: Optional[float] = None,
     was_correct: Optional[bool] = None,
     transcript_text: Optional[str] = None,
-    config: CSRConfig = CSR_CONFIG,
-) -> CSRResult:
+    config: CRSConfig = CRS_CONFIG,
+) -> CRSResult:
     """
     Compute the Cognitive Readiness Score and a difficulty recommendation.
 
-    All arguments are optional and independently defaultable, because CSR
+    All arguments are optional and independently defaultable, because CRS
     must be computable at different points in the student workflow (e.g.
     `get_initial_difficulty` has no `time_spent`/`time_limit`/`was_correct`
     yet, since the assessment hasn't started). Each missing input falls
@@ -92,25 +92,25 @@ def compute_csr(
 
     Args:
         recent_scores_pct: history for both Performance (P) and Trend (T).
-        attention_score_pct: 0-100 average attention for the session.
+        attention_score_pct: 0-100 average behavioral-cue score for the session.
         time_spent / time_limit: seconds, for Response Integrity (I).
         was_correct: correctness of the most recent response (explanation
             text only for I — see response_integrity.py docstring).
         transcript_text: transcript of content viewed, for Complexity (C).
-        config: CSRConfig (weights, thresholds, sub-configs).
+        config: CRSConfig (weights, thresholds, sub-configs).
 
     Returns:
-        CSRResult — csr in [0,1], difficulty tier, component breakdown,
+        CRSResult — crs in [0,1], difficulty tier, component breakdown,
         weights actually used, and a human-readable explanation string.
     """
     perf: PerformanceResult = compute_performance(recent_scores_pct, config.performance)
 
     if attention_score_pct is None:
         attention_value = 0.5
-        attention_explanation = "No attention data provided — neutral default (0.50)."
+        attention_explanation = "No behavioral-cue data provided — neutral default (0.50)."
     else:
         attention_value = max(0.0, min(1.0, attention_score_pct / 100.0))
-        attention_explanation = f"Session attention score = {attention_score_pct:.0f}%."
+        attention_explanation = f"Session behavioral-cue score = {attention_score_pct:.0f}%."
 
     if time_spent is None or time_limit is None:
         integrity_value = 1.0
@@ -139,37 +139,37 @@ def compute_csr(
     complexity_value = complexity_detail.complexity_score
 
     w = config.weights
-    csr = (
+    crs = (
         w.alpha * perf.score
         + w.beta * attention_value
         + w.gamma * integrity_value
         + w.delta * trend_value
         + w.epsilon * complexity_value
     )
-    csr = max(0.0, min(1.0, csr))
+    crs = max(0.0, min(1.0, crs))
 
-    difficulty = _difficulty_from_csr(csr, config)
+    difficulty = _difficulty_from_crs(crs, config)
 
-    components = CSRComponents(
+    components = CRSComponents(
         performance=round(perf.score, 4),
-        attention=round(attention_value, 4),
+        behavioral_cue=round(attention_value, 4),
         integrity=round(integrity_value, 4),
         trend=round(trend_value, 4),
         complexity=round(complexity_value, 4),
     )
 
     explanation = (
-        f"CSR = {w.alpha:.2f}*P({perf.score:.2f}) + {w.beta:.2f}*A({attention_value:.2f}) "
+        f"CRS = {w.alpha:.2f}*P({perf.score:.2f}) + {w.beta:.2f}*B({attention_value:.2f}) "
         f"+ {w.gamma:.2f}*I({integrity_value:.2f}) + {w.delta:.2f}*T({trend_value:.2f}) "
-        f"+ {w.epsilon:.2f}*C({complexity_value:.2f}) = {csr:.3f} -> '{difficulty}'. "
-        f"P: {perf.explanation} A: {attention_explanation} "
+        f"+ {w.epsilon:.2f}*C({complexity_value:.2f}) = {crs:.3f} -> '{difficulty}'. "
+        f"P: {perf.explanation} B: {attention_explanation} "
         f"I: {integrity_explanation} T: {trend_detail.explanation} "
         f"C: {complexity_detail.explanation}"
     )
 
-    return CSRResult(
-        csr=round(csr, 4),
-        csr_pct=round(csr * 100, 1),
+    return CRSResult(
+        crs=round(crs, 4),
+        crs_pct=round(crs * 100, 1),
         difficulty=difficulty,
         components=components,
         weights_used=w.as_dict(),

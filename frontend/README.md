@@ -1,6 +1,6 @@
 # NeuroLearn — Adaptive Learning Platform
 
-AI-powered e-learning platform with real-time attention monitoring, live video transcription, adaptive assessments, and gamification.
+AI-powered e-learning platform with real-time behavioral-cue monitoring, live video transcription, adaptive assessments, and gamification.
 
 ---
 
@@ -51,7 +51,7 @@ pip install -r requirements.txt
 ```
 
 This installs:
-- **MediaPipe** → webcam attention detection (eye tracking, head pose, blink rate)
+- **MediaPipe** → webcam behavioral cue detection (eye tracking, head pose, blink rate)
 - **OpenAI Whisper** → live video transcription
 - **FLAN-T5** → AI question generation from transcripts
 - **PyTorch** → ML model runtime
@@ -93,7 +93,7 @@ neurolearn/
 │   ├── TopicCard.tsx             # Course card with progress
 │   ├── VideoPlayer.tsx           # MP4 + YouTube + any URL support
 │   ├── CameraFeed.tsx            # Webcam → base64 frames → POST to API
-│   ├── AttentionPanel.tsx        # Real-time attention score gauge
+│   ├── AttentionPanel.tsx        # Real-time behavioral-cue score gauge
 │   ├── TranscriptionPanel.tsx    # Live transcript synced to video
 │   ├── VideoLinkSelector.tsx     # Course video picker
 │   ├── AssessmentCard.tsx        # Quiz question with MCQ selection
@@ -109,10 +109,10 @@ neurolearn/
 │   ├── schemas/models.py         # Pydantic JSON models
 │   ├── data/database.py          # TinyDB dummy database
 │   ├── ml/
-│   │   ├── attention_model.py    # MediaPipe face mesh → attention score
+│   │   ├── attention_model.py    # MediaPipe face mesh → behavioral-cue score
 │   │   ├── transcription_model.py # Whisper → transcript segments
 │   │   ├── question_generator.py # FLAN-T5 → quiz questions
-│   │   └── adaptive_engine.py    # Score+attention → difficulty
+│   │   └── adaptive_engine.py    # Score+behavioral cue → difficulty
 │   └── routers/
 │       ├── student.py            # Profile, XP
 │       ├── courses.py            # Course listing, videos
@@ -156,7 +156,7 @@ Student opens /video?course=course_001
 ```
 Student clicks "Take Assessment"
 
-1. Navigate to /assessment?course=X&video=Y&attention=78
+1. Navigate to /assessment?course=X&video=Y&behavioral_cue=78
 2. Frontend sends → POST /api/assessment/generate
    Body: { course_id, video_id, attention_score: 78, transcript_text: "..." }
    Backend: Adaptive Engine picks difficulty + FLAN-T5 generates questions
@@ -188,9 +188,9 @@ Student clicks "Take Assessment"
 | GET | `/api/courses` | All courses with progress |
 | GET | `/api/courses/{id}` | Course details + video links |
 | GET | `/api/courses/{id}/videos/{vid}` | Specific video |
-| **POST** | **`/api/attention/snapshot`** | **Camera frame → ML → attention score** |
+| **POST** | **`/api/attention/snapshot`** | **Camera frame → ML → behavioral-cue score** |
 | GET | `/api/attention/dummy-snapshot` | Test without camera |
-| GET | `/api/attention/history` | Session attention logs |
+| GET | `/api/attention/history` | Session behavioral-cue logs |
 | GET | `/api/transcription/{id}` | Full video transcript |
 | GET | `/api/transcription/{id}/live` | Segment at timestamp |
 | POST | `/api/transcription/chunk` | Transcribe audio chunk |
@@ -242,7 +242,7 @@ Use the "Play Custom URL" button on the video page to paste any URL.
 
 **Backend:** FastAPI, Pydantic, TinyDB, Loguru
 
-**ML Models:** MediaPipe (attention), OpenAI Whisper (transcription), FLAN-T5 (questions), Custom adaptive engine
+**ML Models:** MediaPipe (behavioral cue), OpenAI Whisper (transcription), FLAN-T5 (questions), Custom adaptive engine
 
 ---
 
@@ -252,7 +252,7 @@ Use the "Play Custom URL" button on the video page to paste any URL.
 |-------|------|-------------|
 | `/` | Splash | Animated logo → redirect to dashboard |
 | `/dashboard` | Dashboard | Course grid, XP stats, daily challenges, badges |
-| `/video` | Video Learning | Video player, camera feed, attention monitor, transcription |
+| `/video` | Video Learning | Video player, camera feed, behavioral cue monitor, transcription |
 | `/assessment` | Assessment | Adaptive quiz with timer |
 | `/results` | Results | Score gauge, XP earned, adaptive feedback |
 | `/leaderboard` | Leaderboard | Global rankings with podium |

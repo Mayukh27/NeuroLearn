@@ -1,13 +1,13 @@
 """
 scenario_validation.py — regenerates the Scenario Validation table (§5.1
 of NeuroLearn-MCL_Manuscript_Revision_Package.docx) directly from the
-shipped ml/csr.py implementation. No hand-constructed numbers: every row
-is the real output of compute_csr() for the listed inputs.
+shipped ml/crs.py implementation. No hand-constructed numbers: every row
+is the real output of compute_crs() for the listed inputs.
 
 Run from backend/ (note: requires backend/ on PYTHONPATH):
     PYTHONPATH=. python3 scripts/scenario_validation.py
 """
-from ml.csr import compute_csr
+from ml.crs import compute_crs
 
 SCENARIOS = [
     ("Strong, attentive, thoughtful pace, improving", dict(
@@ -39,7 +39,7 @@ SCENARIOS = [
         ),
     )),
     ("No data yet (cold-start / initial difficulty)", dict()),
-    ("Low attention, high performance, thoughtful pace", dict(
+    ("Low behavioral_cue, high performance, thoughtful pace", dict(
         recent_scores_pct=[85, 90, 88], attention_score_pct=20,
         time_spent=40, time_limit=60, was_correct=True,
         transcript_text=(
@@ -51,16 +51,16 @@ SCENARIOS = [
 
 
 def main():
-    header = f'{"Scenario":48s} {"P":>5} {"A":>5} {"I":>5} {"T":>5} {"C":>5} {"CSR":>6} {"Tier":>7}'
+    header = f'{"Scenario":48s} {"P":>5} {"A":>5} {"I":>5} {"T":>5} {"C":>5} {"CRS":>6} {"Tier":>7}'
     print(header)
     print("-" * len(header))
     for name, kwargs in SCENARIOS:
-        r = compute_csr(**kwargs)
+        r = compute_crs(**kwargs)
         c = r.components
         print(
-            f"{name:48s} {c.performance:5.2f} {c.attention:5.2f} "
+            f"{name:48s} {c.performance:5.2f} {c.behavioral_cue:5.2f} "
             f"{c.integrity:5.2f} {c.trend:5.2f} {c.complexity:5.2f} "
-            f"{r.csr:6.3f} {r.difficulty:>7s}"
+            f"{r.crs:6.3f} {r.difficulty:>7s}"
         )
 
 

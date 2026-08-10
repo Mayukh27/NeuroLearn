@@ -1,7 +1,7 @@
 "use client"
 
 /**
- * CameraFeed — Webcam capture + attention scoring pipeline
+ * CameraFeed — Webcam capture + behavioral_cue scoring pipeline
  *
  * PIPELINE (runs every 500ms while video plays):
  *   1. getUserMedia → <video srcObject={stream}>
@@ -72,7 +72,7 @@ function generateLocalDummy(): AttentionSnapshotResponse {
   const messages = {
     attentive: "Great focus! Keep it up.",
     inattentive: "Try to stay focused on the content.",
-    unfocused: "Your attention is very low. Take a break?",
+    unfocused: "Your behavioral cue is very low. Take a break?",
   }
   return {
     timestamp: new Date().toISOString(),
@@ -395,7 +395,7 @@ export default function CameraFeed({
             </div>
             <p className="text-xs text-[var(--text-muted)]">
               Camera monitoring is off by your choice. Your readiness score uses a
-              neutral attention value instead — this does not lower your score.
+              neutral behavioral-cue value instead — this does not lower your score.
             </p>
           </div>
         )}

@@ -6,18 +6,18 @@ Adaptive Engine — Phase 9 of the implementation spec.
 FIXES CR1 (peer review packet) at the integration point: previously,
 determine_difficulty() ran a rule cascade (score baseline + integer
 modifiers, clamped to 3 tiers). It now computes the Cognitive Readiness
-Score (CSR) via ml/csr.py and selects difficulty from configurable CSR
-thresholds (config/csr_config.py: DifficultyThresholds), per Phase 9:
+Score (CRS) via ml/crs.py and selects difficulty from configurable CRS
+thresholds (config/crs_config.py: DifficultyThresholds), per Phase 9:
 
-    CSR > hard_threshold   -> "hard"
+    CRS > hard_threshold   -> "hard"
     medium..hard           -> "medium"
-    CSR < medium_threshold -> "easy"
+    CRS < medium_threshold -> "easy"
 
 BACKWARD COMPATIBILITY: the public method signatures of
 `determine_difficulty()` and `get_initial_difficulty()` are UNCHANGED, so
 routers/assessment.py does not need to change to pick this up. The legacy
 rule cascade is preserved as `_determine_difficulty_legacy()` and is still
-reachable by setting `CSR_CONFIG.csr_enabled = False` (e.g. for an A/B
+reachable by setting `CRS_CONFIG.crs_enabled = False` (e.g. for an A/B
 comparison between the two engines, which is one of the three evaluation
 options the review packet's §5 suggests) — it is not deleted, per the
 spec's "no placeholder implementations ... backward compatible" standard.
@@ -25,11 +25,11 @@ spec's "no placeholder implementations ... backward compatible" standard.
 NOTE on history: `_history` remains an in-memory dict for this phase,
 identical to the legacy engine's storage. This still does not survive a
 process restart. The peer review packet's CR1/MJ4 concerns and the
-implementation spec's Phase 8 (persistent CSR history) call for moving
+implementation spec's Phase 8 (persistent CRS history) call for moving
 this into TinyDB — that is intentionally NOT done in this file, since it
 requires a schema change (Phase 13) and new persistence functions
 (Phase 8), which are the next stop-point, not bundled into this change.
-`compute_csr()` itself is storage-agnostic — it accepts history as a plain
+`compute_crs()` itself is storage-agnostic — it accepts history as a plain
 list — so swapping the source from `self._history` to a TinyDB-backed
 query later is a small, localized change in this file only.
 """
@@ -41,16 +41,16 @@ from typing import Optional
 
 from loguru import logger
 
-from config.csr_config import CSR_CONFIG
-from ml.csr import compute_csr, CSRResult
+from config.crs_config import CRS_CONFIG
+from ml.crs import compute_crs, CRSResult
 
 
 class AdaptiveEngine:
 
     DIFFICULTY_LEVELS = ["easy", "medium", "hard"]
 
-    # ── Legacy rule-cascade constants (kept for the CSR-disabled fallback
-    # path only — do not use these in the CSR-driven path below). ──
+    # ── Legacy rule-cascade constants (kept for the CRS-disabled fallback
+    # path only — do not use these in the CRS-driven path below). ──
     UPGRADE_THRESHOLD = 80
     MAINTAIN_THRESHOLD = 50
     LOW_ATTENTION_THRESHOLD = 40
@@ -61,11 +61,11 @@ class AdaptiveEngine:
 
     def __init__(self):
         # In-memory history (Phase 8 will move this to TinyDB — see module
-        # docstring). Each entry: {score, difficulty, attention, time_spent,
+        # docstring). Each entry: {score, difficulty, behavioral_cue, time_spent,
         # time_limit, was_correct, timestamp}.
         self._history: dict[str, list[dict]] = {}
         logger.info(
-            f"Adaptive engine initialized (csr_enabled={CSR_CONFIG.csr_enabled})"
+            f"Adaptive engine initialized (crs_enabled={CRS_CONFIG.crs_enabled})"
         )
 
     # ──────────────────────────────────────────────────────────────────
@@ -89,7 +89,7 @@ class AdaptiveEngine:
 
         Two NEW optional kwargs are added at the end (`transcript_text`,
         `was_correct`) so existing callers that don't pass them keep working
-        unchanged (they fall back to neutral defaults inside compute_csr),
+        unchanged (they fall back to neutral defaults inside compute_crs),
         while routers/assessment.py can be updated to actually pass a real
         transcript and correctness flag in a follow-up change (Phase 11/13)
         without breaking this signature again.
@@ -97,10 +97,10 @@ class AdaptiveEngine:
         Returns the same top-level keys the legacy engine returned
         (`performance_trend`, `recommended_action`,
         `next_assessment_difficulty`, `strength_areas`, `weak_areas`,
-        `_debug`), plus a new `csr` block with the full CSR breakdown, so
+        `_debug`), plus a new `crs` block with the full CRS breakdown, so
         existing frontend code that only reads the old keys is unaffected.
         """
-        if not CSR_CONFIG.csr_enabled:
+        if not CRS_CONFIG.crs_enabled:
             return self._determine_difficulty_legacy(
                 student_id, current_score, attention_score, time_spent,
                 time_limit, previous_difficulty, previous_scores,
@@ -108,7 +108,7 @@ class AdaptiveEngine:
 
         scores_history = self._scores_for(student_id, previous_scores, current_score)
 
-        csr_result: CSRResult = compute_csr(
+        crs_result: CRSResult = compute_crs(
             recent_scores_pct=scores_history,
             attention_score_pct=attention_score,
             time_spent=time_spent,
@@ -117,31 +117,31 @@ class AdaptiveEngine:
             transcript_text=transcript_text,
         )
 
-        trend_label = csr_result.detail["trend"]["label"]
+        trend_label = crs_result.detail["trend"]["label"]
         strengths, weaknesses = self._analyze_areas(current_score, attention_score)
-        recommended_action = self._recommended_action(csr_result.difficulty, trend_label)
+        recommended_action = self._recommended_action(crs_result.difficulty, trend_label)
 
         self._record_history(
-            student_id, current_score, csr_result.difficulty, attention_score,
+            student_id, current_score, crs_result.difficulty, attention_score,
             time_spent=time_spent, time_limit=time_limit, was_correct=was_correct,
         )
 
         return {
             "performance_trend": trend_label,
             "recommended_action": recommended_action,
-            "next_assessment_difficulty": csr_result.difficulty,
+            "next_assessment_difficulty": crs_result.difficulty,
             "strength_areas": strengths,
             "weak_areas": weaknesses,
-            "csr": {
-                "score": csr_result.csr,
-                "score_pct": csr_result.csr_pct,
-                "components": csr_result.components.as_dict(),
-                "weights_used": csr_result.weights_used,
-                "explanation": csr_result.explanation,
+            "crs": {
+                "score": crs_result.crs,
+                "score_pct": crs_result.crs_pct,
+                "components": crs_result.components.as_dict(),
+                "weights_used": crs_result.weights_used,
+                "explanation": crs_result.explanation,
             },
             "_debug": {
-                "engine": "csr",
-                "reason": csr_result.explanation,
+                "engine": "crs",
+                "reason": crs_result.explanation,
             },
         }
 
@@ -155,7 +155,7 @@ class AdaptiveEngine:
         Determine initial assessment difficulty before quiz starts.
         Signature UNCHANGED for backward compatibility.
         """
-        if not CSR_CONFIG.csr_enabled:
+        if not CRS_CONFIG.crs_enabled:
             return self._get_initial_difficulty_legacy(student_id, attention_score, previous_score)
 
         scores_history = self._history.get(student_id, [])
@@ -163,31 +163,31 @@ class AdaptiveEngine:
         if previous_score is not None:
             recent_scores = recent_scores + [previous_score]
 
-        csr_result: CSRResult = compute_csr(
+        crs_result: CRSResult = compute_crs(
             recent_scores_pct=recent_scores or None,
             attention_score_pct=attention_score,
-            # No timing/correctness yet — compute_csr defaults Integrity to
-            # its neutral maximum (see csr.py docstring) so a student isn't
+            # No timing/correctness yet — compute_crs defaults Integrity to
+            # its neutral maximum (see crs.py docstring) so a student isn't
             # penalized before answering anything.
         )
 
         reason = (
-            f"Initial CSR={csr_result.csr:.2f} -> '{csr_result.difficulty}'. "
-            f"{csr_result.explanation}"
+            f"Initial CRS={crs_result.crs:.2f} -> '{crs_result.difficulty}'. "
+            f"{crs_result.explanation}"
         )
 
         return {
-            "difficulty": csr_result.difficulty,
+            "difficulty": crs_result.difficulty,
             "adaptive_metadata": {
                 "previous_score": previous_score,
-                "adjusted_difficulty": csr_result.difficulty,
+                "adjusted_difficulty": crs_result.difficulty,
                 "reason": reason,
-                "csr": csr_result.csr,
+                "crs": crs_result.crs,
             },
         }
 
     # ──────────────────────────────────────────────────────────────────
-    # Helpers (CSR-driven path)
+    # Helpers (CRS-driven path)
     # ──────────────────────────────────────────────────────────────────
 
     def _scores_for(
@@ -221,8 +221,8 @@ class AdaptiveEngine:
         }
         return action_messages.get((difficulty, trend_label), "Keep learning! Every step counts.")
 
-    def _analyze_areas(self, score: float, attention: float) -> tuple[list[str], list[str]]:
-        """Unchanged from the legacy engine — not part of CSR, just display copy."""
+    def _analyze_areas(self, score: float, behavioral_cue: float) -> tuple[list[str], list[str]]:
+        """Unchanged from the legacy engine — not part of CRS, just display copy."""
         strengths = []
         weaknesses = []
 
@@ -234,10 +234,10 @@ class AdaptiveEngine:
         else:
             weaknesses.extend(["Core Concepts", "Deep Understanding"])
 
-        if attention >= 70:
+        if behavioral_cue >= 70:
             strengths.append("Focus & Engagement")
-        elif attention < 40:
-            weaknesses.append("Sustained Attention")
+        elif behavioral_cue < 40:
+            weaknesses.append("Sustained Behavioral Cue")
 
         return strengths, weaknesses
 
@@ -246,7 +246,7 @@ class AdaptiveEngine:
         student_id: str,
         score: float,
         difficulty: str,
-        attention: float,
+        behavioral_cue: float,
         time_spent: Optional[float] = None,
         time_limit: Optional[float] = None,
         was_correct: Optional[bool] = None,
@@ -257,7 +257,7 @@ class AdaptiveEngine:
         self._history[student_id].append({
             "score": score,
             "difficulty": difficulty,
-            "attention": attention,
+            "behavioral_cue": behavioral_cue,
             "time_spent": time_spent,
             "time_limit": time_limit,
             "was_correct": was_correct,
@@ -268,8 +268,8 @@ class AdaptiveEngine:
 
     # ──────────────────────────────────────────────────────────────────
     # Legacy rule cascade — preserved verbatim, reachable only when
-    # CSR_CONFIG.csr_enabled is False. Do not extend this path; extend
-    # the CSR modules instead.
+    # CRS_CONFIG.crs_enabled is False. Do not extend this path; extend
+    # the CRS modules instead.
     # ──────────────────────────────────────────────────────────────────
 
     def _determine_difficulty_legacy(
@@ -303,7 +303,7 @@ class AdaptiveEngine:
         time_note = ""
         if time_ratio < self.SPEED_GUESS_RATIO and current_score < 70:
             time_modifier = -1
-            time_note = "Very fast completion with low score suggests guessing"
+            time_note = "Very fast completion with low score suggests rapid completion"
         elif self.THOUGHTFUL_RATIO_LOW <= time_ratio <= self.THOUGHTFUL_RATIO_HIGH:
             time_note = "Thoughtful pace — good engagement"
 
@@ -319,7 +319,7 @@ class AdaptiveEngine:
 
         reasons = [f"Score: {current_score:.0f}% -> {score_action}"]
         if attention_modifier != 0:
-            reasons.append(f"Attention: {attention_score:.0f}% (low -> easier)")
+            reasons.append(f"Behavioral Cue: {attention_score:.0f}% (low -> easier)")
         if time_modifier != 0:
             reasons.append(time_note)
         if trend_modifier != 0:
@@ -341,7 +341,7 @@ class AdaptiveEngine:
                 "engine": "legacy_rule_cascade",
                 "baseline": baseline,
                 "modifiers": {
-                    "attention": attention_modifier,
+                    "behavioral_cue": attention_modifier,
                     "time": time_modifier,
                     "trend": trend_modifier,
                 },
@@ -373,7 +373,7 @@ class AdaptiveEngine:
         if attention_score < self.LOW_ATTENTION_THRESHOLD and difficulty != "easy":
             old_diff = difficulty
             difficulty = self._level_down(difficulty)
-            reason += f" | Low attention ({attention_score:.0f}%) -> {old_diff} reduced to {difficulty}"
+            reason += f" | Low behavioral_cue ({attention_score:.0f}%) -> {old_diff} reduced to {difficulty}"
 
         return {
             "difficulty": difficulty,

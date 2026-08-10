@@ -52,7 +52,7 @@ function VideoContent() {
   const [customUrl, setCustomUrl] = useState("")
   const [showCustomInput, setShowCustomInput] = useState(false)
 
-  // Attention state
+  // Behavioral Cue state
   const [latestAttention, setLatestAttention] = useState<AttentionSnapshotResponse | null>(null)
   const [attentionHistory, setAttentionHistory] = useState<number[]>([])
   const [sessionAvgAttention, setSessionAvgAttention] = useState(0)
@@ -144,7 +144,7 @@ function VideoContent() {
   }
 
   const goToAssessment = () => {
-    // Build attention summary to thread through to report card
+    // Build behavioral_cue summary to thread through to report card
     const attentionSummary = {
       avgScore: Math.round(sessionAvgAttention * 10) / 10,
       scoreHistory: attentionHistory.slice(-40),
@@ -160,7 +160,7 @@ function VideoContent() {
       video: selectedVideo?.id || "custom",
       courseTitle: course?.title || "Custom Video",
       videoTitle: selectedVideo?.title || "Video Session",
-      attention: Math.round(sessionAvgAttention).toString(),
+      behavioral_cue: Math.round(sessionAvgAttention).toString(),
       attentionData: JSON.stringify(attentionSummary),
     })
     router.push(`/assessment?${params.toString()}`)
@@ -185,7 +185,7 @@ function VideoContent() {
           </motion.button>
           <div>
             <h1 className="text-xl font-bold text-[var(--text-primary)]">Video Learning</h1>
-            <p className="text-xs text-[var(--text-muted)]">AI-powered attention monitoring &amp; live transcription</p>
+            <p className="text-xs text-[var(--text-muted)]">AI-powered behavioral-cue monitoring &amp; live transcription</p>
           </div>
         </div>
         <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => setShowCustomInput(!showCustomInput)}
@@ -245,7 +245,7 @@ function VideoContent() {
                   <div className="flex-1">
                     <h3 className="text-base font-bold text-[var(--text-primary)] mb-1">Ready for Assessment!</h3>
                     <p className="text-xs text-[var(--text-muted)] mb-3">
-                      Your average attention score was{" "}
+                      Your average behavioral-cue score was{" "}
                       <span className="font-bold text-violet-400">{Math.round(sessionAvgAttention)}%</span>.
                       Based on this and the video content, we&apos;ll generate a personalized quiz.
                     </p>
@@ -264,7 +264,7 @@ function VideoContent() {
                 <div className="grid grid-cols-3 gap-3 mt-4 pt-4 border-t border-violet-500/15">
                   <div className="text-center">
                     <p className="text-lg font-bold text-[var(--text-primary)]">{Math.round(sessionAvgAttention)}%</p>
-                    <p className="text-[10px] text-[var(--text-muted)]">Avg Attention</p>
+                    <p className="text-[10px] text-[var(--text-muted)]">Avg Behavioral Cue</p>
                   </div>
                   <div className="text-center">
                     <p className="text-lg font-bold text-[var(--text-primary)]">{attentionHistory.length}</p>
@@ -279,7 +279,7 @@ function VideoContent() {
             )}
           </AnimatePresence>
 
-          {/* Inline attention alert during playback */}
+          {/* Inline behavioral_cue alert during playback */}
           <AnimatePresence>
             {isPlaying && latestAttention && latestAttention.state !== "attentive" && (
               <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}
@@ -293,7 +293,7 @@ function VideoContent() {
           </AnimatePresence>
         </div>
 
-        {/* Right: Camera + Attention + Transcription */}
+        {/* Right: Camera + Behavioral Cue + Transcription */}
         <div className="lg:col-span-3 space-y-4 order-3">
           <CameraFeed
             isVideoPlaying={isPlaying}

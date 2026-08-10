@@ -2,32 +2,32 @@
 
 import { motion } from "framer-motion"
 import { Brain, Eye, ShieldCheck, TrendingUp, FileText, Info } from "lucide-react"
-import type { CsrBlock } from "@/lib/api"
+import type { CrsBlock } from "@/lib/api"
 
-interface CSRPanelProps {
-  csr: CsrBlock
+interface CRSPanelProps {
+  crs: CrsBlock
 }
 
 const COMPONENT_META: {
-  key: keyof CsrBlock["components"]
+  key: keyof CrsBlock["components"]
   label: string
   icon: typeof Brain
   color: string
 }[] = [
   { key: "performance", label: "Performance", icon: TrendingUp, color: "#10b981" },
-  { key: "attention", label: "Attention", icon: Eye, color: "#3b82f6" },
+  { key: "behavioralCue", label: "Behavioral Cue", icon: Eye, color: "#3b82f6" },
   { key: "integrity", label: "Integrity", icon: ShieldCheck, color: "#f59e0b" },
   { key: "trend", label: "Trend", icon: TrendingUp, color: "#8b5cf6" },
   { key: "complexity", label: "Complexity", icon: FileText, color: "#ec4899" },
 ]
 
-export default function CSRPanel({ csr }: CSRPanelProps) {
+export default function CRSPanel({ crs }: CRSPanelProps) {
   const radius = 42
   const circumference = 2 * Math.PI * radius
-  const offset = circumference - csr.score * circumference
+  const offset = circumference - crs.score * circumference
 
-  const bandColor = csr.score > 0.75 ? "#ef4444" : csr.score >= 0.45 ? "#f59e0b" : "#10b981"
-  const bandLabel = csr.score > 0.75 ? "Hard band" : csr.score >= 0.45 ? "Medium band" : "Easy band"
+  const bandColor = crs.score > 0.75 ? "#ef4444" : crs.score >= 0.45 ? "#f59e0b" : "#10b981"
+  const bandLabel = crs.score > 0.75 ? "Hard band" : crs.score >= 0.45 ? "Medium band" : "Easy band"
 
   return (
     <motion.div
@@ -62,15 +62,15 @@ export default function CSRPanel({ csr }: CSRPanelProps) {
             />
           </svg>
           <div className="absolute inset-0 flex flex-col items-center justify-center">
-            <span className="text-xl font-bold text-[var(--text-primary)]">{csr.scorePct.toFixed(0)}</span>
-            <span className="text-[9px] text-[var(--text-muted)]">CSR</span>
+            <span className="text-xl font-bold text-[var(--text-primary)]">{crs.scorePct.toFixed(0)}</span>
+            <span className="text-[9px] text-[var(--text-muted)]">CRS</span>
           </div>
         </div>
 
         {/* Component bars */}
         <div className="flex-1 space-y-1.5">
           {COMPONENT_META.map((c, i) => {
-            const value = csr.components[c.key]
+            const value = crs.components[c.key]
             const Icon = c.icon
             return (
               <div key={c.key} className="flex items-center gap-2">
@@ -97,7 +97,7 @@ export default function CSRPanel({ csr }: CSRPanelProps) {
       {/* Explanation */}
       <div className="flex items-start gap-2 p-2 rounded-lg bg-[var(--bg-primary)] border border-[var(--border-subtle)]">
         <Info size={11} className="text-[var(--text-muted)] shrink-0 mt-0.5" />
-        <p className="text-[10px] text-[var(--text-muted)] leading-relaxed">{csr.explanation}</p>
+        <p className="text-[10px] text-[var(--text-muted)] leading-relaxed">{crs.explanation}</p>
       </div>
     </motion.div>
   )

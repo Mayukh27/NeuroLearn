@@ -1,7 +1,7 @@
 "use client"
 
 /**
- * ConsentModal — webcam attention-monitoring consent gate
+ * ConsentModal — webcam behavioral_cue-monitoring consent gate
  *
  * FIX (CR6, peer review packet): NeuroLearn previously started the camera
  * and streamed frames to /api/attention/snapshot with no consent prompt,
@@ -11,9 +11,9 @@
  * via POST /api/attention/consent so the backend can enforce the same
  * rule server-side (see routers/attention.py).
  *
- * Declining does NOT penalize the student: CSR's Attention (A) component
- * defaults to a neutral 0.5 when no attention data is supplied
- * (backend/ml/csr.py), so opting out only removes a potential *upward*
+ * Declining does NOT penalize the student: CRS's Behavioral Cue (B) component
+ * defaults to a neutral 0.5 when no behavioral-cue data is supplied
+ * (backend/ml/crs.py), so opting out only removes a potential *upward*
  * signal, never forces a lower readiness score or an easier/harder tier.
  */
 
@@ -49,7 +49,7 @@ export default function ConsentModal({ studentId, onDecision }: ConsentModalProp
     } catch {
       // If the backend is unreachable, still honor the student's choice
       // locally — CameraFeed will simply stay off and fall back to the
-      // neutral-attention default rather than retry indefinitely.
+      // neutral-behavioral_cue default rather than retry indefinitely.
     } finally {
       setSubmitting(false)
       onDecision(granted)
@@ -74,9 +74,9 @@ export default function ConsentModal({ studentId, onDecision }: ConsentModalProp
               <Camera className="h-5 w-5 text-indigo-400" />
             </div>
             <div>
-              <h2 className="text-lg font-semibold">Use your camera for attention monitoring?</h2>
+              <h2 className="text-lg font-semibold">Use your camera for behavioral-cue monitoring?</h2>
               <p className="mt-1 text-sm text-white/60">
-                This lesson can estimate your on-screen attention from your webcam.
+                This lesson can estimate your on-screen behavioral cue from your webcam.
               </p>
             </div>
           </div>
@@ -85,7 +85,7 @@ export default function ConsentModal({ studentId, onDecision }: ConsentModalProp
             <li className="flex gap-2">
               <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
               Raw video frames are analyzed in memory and are never saved — only a
-              numeric attention score is stored.
+              numeric behavioral-cue score is stored.
             </li>
             <li className="flex gap-2">
               <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />

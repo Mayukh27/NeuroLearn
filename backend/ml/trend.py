@@ -8,7 +8,7 @@ adaptive_engine.py returned one of three strings ("declining"/"stable"/
 "improving") with an asymmetric effect (declining -> -1 modifier,
 improving -> no bonus at all), which does not match the paper's Table I,
 where T is encoded as a continuous value in {-1, 0, +1} and then rescaled
-via T_rescaled = (T + 1) / 2 so it lies in [0,1] like every other CSR
+via T_rescaled = (T + 1) / 2 so it lies in [0,1] like every other CRS
 component (this is also the exact fix the review packet's §14 "Concrete
 Fixes" recommends).
 
@@ -23,13 +23,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
-from config.csr_config import CSR_CONFIG, TrendConfig
+from config.crs_config import CRS_CONFIG, TrendConfig
 
 
 @dataclass(frozen=True)
 class TrendResult:
     trend_raw: float  # in [-1, 1], matching the paper's Table I encoding
-    trend_score: float  # rescaled to [0,1] via (trend_raw + 1) / 2 — this is "T" in CSR
+    trend_score: float  # rescaled to [0,1] via (trend_raw + 1) / 2 — this is "T" in CRS
     label: str  # "improving" | "stable" | "declining" (for display/explanations only)
     slope: float  # raw slope, percentage-points per assessment, before saturation
     window_used: int
@@ -62,7 +62,7 @@ def _slope(scores: Sequence[float]) -> float:
 
 def compute_trend(
     recent_scores_pct: Optional[Sequence[float]] = None,
-    config: TrendConfig = CSR_CONFIG.trend,
+    config: TrendConfig = CRS_CONFIG.trend,
 ) -> TrendResult:
     """
     Compute the Learning Trend (T) component.
@@ -74,7 +74,7 @@ def compute_trend(
 
     Returns:
         TrendResult with `trend_score` already rescaled to [0,1] — this is
-        the value to feed directly into CSR's weighted sum as "T".
+        the value to feed directly into CRS's weighted sum as "T".
     """
     if not recent_scores_pct or len(recent_scores_pct) < 2:
         return TrendResult(

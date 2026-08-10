@@ -1,23 +1,23 @@
 """
 ============================================================
-ROUTER: Attention — Camera-based attention monitoring
+ROUTER: Behavioral Cue — Camera-based behavioral-cue monitoring
 Endpoints:
     GET  /api/attention/consent        — check consent status
     POST /api/attention/consent        — grant/revoke consent
     POST /api/attention/snapshot       — analyze a camera frame (consent-gated)
-    GET  /api/attention/history        — get attention log for a session
+    GET  /api/attention/history        — get behavioral_cue log for a session
     POST /api/attention/purge-expired  — retention-window cleanup (CR6)
 ============================================================
 
 CONSENT (CR6, peer review packet): this router previously analyzed and
 logged every frame the frontend sent with no consent check, no retention
 policy, and no opt-out path. `/snapshot` now refuses to run the ML model
-or write anything to the attention log unless a prior `granted=True`
+or write anything to the behavioral_cue log unless a prior `granted=True`
 consent record exists for that student_id AND the request itself carries
 `consent_confirmed=True` (belt-and-suspenders: the frontend gates camera
 start on consent, this is the server-side enforcement of the same rule).
-Declining consent must not silently zero-out or otherwise penalize CSR —
-`ml/csr.py` already defaults Attention (A) to a neutral 0.5 when no
+Declining consent must not silently zero-out or otherwise penalize CRS —
+`ml/crs.py` already defaults Behavioral Cue (B) to a neutral 0.5 when no
 attention_score_pct is supplied, so opting out only removes the *bonus*
 signal, it never forces "easy" or "hard".
 """
@@ -42,7 +42,7 @@ from data.database import (
 from data.models_orm import User
 from auth.security import get_current_user
 
-router = APIRouter(prefix="/api/attention", tags=["Attention"])
+router = APIRouter(prefix="/api/attention", tags=["Behavioral Cue"])
 
 
 @router.get("/consent", response_model=ConsentStatus)
@@ -61,7 +61,7 @@ async def grant_or_revoke_consent(
 ):
     """
     Record the authenticated student's consent decision for webcam-based
-    attention monitoring. Called by the frontend ConsentModal before the
+    behavioral-cue monitoring. Called by the frontend ConsentModal before the
     camera is ever started, and again if the student later revokes
     consent from their profile/privacy settings. `grant.student_id` is
     ignored for authorization — consent is always recorded against the
@@ -85,7 +85,7 @@ async def analyze_frame(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Analyze a camera frame for the authenticated student's attention.
+    Analyze a camera frame for the authenticated student's behavioral_cue.
     Consent-gated (CR6): returns 403 rather than analyzing or logging
     anything if the student has not granted consent, or if the request
     doesn't carry consent_confirmed=True.
@@ -114,7 +114,7 @@ async def analyze_frame(
         raise HTTPException(
             status_code=403,
             detail=(
-                "Webcam attention monitoring requires recorded consent. "
+                "Webcam behavioral-cue monitoring requires recorded consent. "
                 "Call POST /api/attention/consent with granted=true first, "
                 "then resend this request with consent_confirmed=true."
             ),
@@ -150,7 +150,7 @@ async def purge_expired():
 
 @router.get("/history")
 async def get_attention_history(video_id: str, current_user: User = Depends(get_current_user)):
-    """Get attention logs for a video watching session (your own only)."""
+    """Get behavioral-cue logs for a video watching session (your own only)."""
     logs = get_attention_logs(video_id, current_user.id)
     return {
         "video_id": video_id,
@@ -166,7 +166,7 @@ async def get_attention_history(video_id: str, current_user: User = Depends(get_
 @router.get("/dummy-snapshot", response_model=AttentionSnapshot)
 async def get_dummy_snapshot():
     """
-    Get a dummy attention snapshot (no camera required).
+    Get a dummy behavioral-cue snapshot (no camera required).
     Useful for testing the frontend without webcam.
     """
     return attention_detector._generate_dummy_snapshot(

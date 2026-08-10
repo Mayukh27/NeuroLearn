@@ -513,13 +513,13 @@ export function generateAttentionSnapshot(): AttentionSnapshot {
       "You're doing amazing — stay locked in!",
     ],
     inattentive: [
-      "Looks like your attention is drifting. Try refocusing.",
+      "Looks like your behavioral cue is drifting. Try refocusing.",
       "You seem a bit distracted. The key point is coming up!",
       "Hey, try to stay with the content — you've got this!",
     ],
     unfocused: [
       "You seem unfocused. Consider taking a short break.",
-      "Your attention is very low. Pause and stretch if needed.",
+      "Your behavioral cue is very low. Pause and stretch if needed.",
       "Try closing other tabs and refocusing on the video.",
     ],
   }

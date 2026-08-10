@@ -2,17 +2,17 @@
 
 import { motion } from "framer-motion"
 import { Brain, Info } from "lucide-react"
-import type { CsrHistoryEntry } from "@/lib/api"
+import type { CrsHistoryEntry } from "@/lib/api"
 
-interface CSRTrendWidgetProps {
-  history: CsrHistoryEntry[]
+interface CRSTrendWidgetProps {
+  history: CrsHistoryEntry[]
 }
 
-function bandColor(csr: number): string {
-  return csr > 0.75 ? "#ef4444" : csr >= 0.45 ? "#f59e0b" : "#10b981"
+function bandColor(crs: number): string {
+  return crs > 0.75 ? "#ef4444" : crs >= 0.45 ? "#f59e0b" : "#10b981"
 }
 
-export default function CSRTrendWidget({ history }: CSRTrendWidgetProps) {
+export default function CRSTrendWidget({ history }: CRSTrendWidgetProps) {
   if (!history.length) {
     return (
       <motion.div
@@ -39,7 +39,7 @@ export default function CSRTrendWidget({ history }: CSRTrendWidgetProps) {
   const h = 32
   const points = recent.map((entry, i) => {
     const x = recent.length === 1 ? w : (i / (recent.length - 1)) * w
-    const y = h - entry.csr * h
+    const y = h - entry.crs * h
     return `${x},${y}`
   }).join(" ")
 
@@ -55,9 +55,9 @@ export default function CSRTrendWidget({ history }: CSRTrendWidgetProps) {
         <h3 className="text-sm font-bold text-[var(--text-primary)]">Cognitive Readiness</h3>
         <span
           className="ml-auto text-[10px] font-bold px-2 py-0.5 rounded-full"
-          style={{ color: bandColor(latest.csr), backgroundColor: `${bandColor(latest.csr)}1a` }}
+          style={{ color: bandColor(latest.crs), backgroundColor: `${bandColor(latest.crs)}1a` }}
         >
-          {(latest.csr * 100).toFixed(0)}
+          {(latest.crs * 100).toFixed(0)}
         </span>
       </div>
 
@@ -66,7 +66,7 @@ export default function CSRTrendWidget({ history }: CSRTrendWidgetProps) {
           <polyline
             points={points}
             fill="none"
-            stroke={bandColor(latest.csr)}
+            stroke={bandColor(latest.crs)}
             strokeWidth="2"
             strokeLinecap="round"
             strokeLinejoin="round"
@@ -76,7 +76,7 @@ export default function CSRTrendWidget({ history }: CSRTrendWidgetProps) {
       </div>
 
       <p className="text-[10px] text-[var(--text-muted)]">
-        Trending {latest.csr >= (recent[0]?.csr ?? latest.csr) ? "up" : "down"} over last {recent.length} session
+        Trending {latest.crs >= (recent[0]?.crs ?? latest.crs) ? "up" : "down"} over last {recent.length} session
         {recent.length === 1 ? "" : "s"} · current difficulty: <span className="capitalize font-semibold text-[var(--text-secondary)]">{latest.difficulty}</span>
       </p>
     </motion.div>

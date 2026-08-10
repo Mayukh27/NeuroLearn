@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from schemas.models import StudentProfile, XPAwardRequest, XPAwardResponse
 from data.db import get_db
-from data.database import _user_to_dict
+from data.database import _user_to_dict, apply_xp
 from data.models_orm import User
 from auth.security import get_current_user
 
@@ -41,25 +41,12 @@ async def award_xp(
     XP is always credited to whoever the JWT identifies, never to an
     arbitrary id an unauthenticated or malicious caller could supply.
     """
-    new_xp = current_user.xp + request.amount
-    leveled_up = False
-    new_level = current_user.level
-    xp_to_next = current_user.xp_to_next_level
-
-    if new_xp >= xp_to_next:
-        leveled_up = True
-        new_level += 1
-        new_xp -= xp_to_next
-        xp_to_next = int(xp_to_next * 1.2)  # 20% more XP per level
-
-    current_user.xp = new_xp
-    current_user.level = new_level
-    current_user.xp_to_next_level = xp_to_next
+    xp_result = apply_xp(current_user, request.amount)
     db.commit()
 
     return XPAwardResponse(
-        new_xp=new_xp,
-        new_level=new_level,
-        leveled_up=leveled_up,
-        xp_to_next_level=xp_to_next,
+        new_xp=xp_result["new_xp"],
+        new_level=xp_result["new_level"],
+        leveled_up=xp_result["leveled_up"],
+        xp_to_next_level=xp_result["xp_to_next_level"],
     )

@@ -3,16 +3,16 @@
 import { useEffect, useState } from "react"
 import { motion } from "framer-motion"
 import TopicCard from "@/components/TopicCard"
-import CSRTrendWidget from "@/components/CSRTrendWidget"
+import CRSTrendWidget from "@/components/CRSTrendWidget"
 import {
   fetchCourses,
   fetchStudentProfile,
   fetchDailyChallenges,
-  fetchCsrHistory,
+  fetchCrsHistory,
   type Course,
   type StudentProfile,
   type DailyChallenge,
-  type CsrHistoryEntry,
+  type CrsHistoryEntry,
 } from "@/lib/api"
 import { Trophy, Target, Flame, Clock, BookOpen, Zap, CheckCircle2, Circle } from "lucide-react"
 
@@ -22,7 +22,7 @@ export default function DashboardPage() {
   const [courses, setCourses] = useState<Course[]>([])
   const [student, setStudent] = useState<StudentProfile | null>(null)
   const [challenges, setChallenges] = useState<DailyChallenge[]>([])
-  const [csrHistory, setCsrHistory] = useState<CsrHistoryEntry[]>([])
+  const [crsHistory, setCrsHistory] = useState<CrsHistoryEntry[]>([])
   const [isLoading, setIsLoading] = useState(true)
 
   function getLocallySavedCourses(): Course[] {
@@ -42,14 +42,14 @@ export default function DashboardPage() {
       fetchStudentProfile(),
       fetchDailyChallenges(),
       // FIX (auth request): this used to hardcode "student_001" directly,
-      // bypassing the real-user default now built into fetchCsrHistory's
+      // bypassing the real-user default now built into fetchCrsHistory's
       // signature. Backend enforces student_id === the authenticated
       // caller anyway (403 otherwise), so passing anything else would
       // just fail — omit the argument entirely and let it resolve to the
       // real logged-in user.
-      fetchCsrHistory(undefined, 10).catch(() => []), // isolated: no CSR history yet shouldn't block the dashboard
+      fetchCrsHistory(undefined, 10).catch(() => []), // isolated: no CRS history yet shouldn't block the dashboard
     ])
-      .then(([c, s, ch, csr]) => {
+      .then(([c, s, ch, crs]) => {
         const localSaved = getLocallySavedCourses()
         const merged = [...c]
         for (const localCourse of localSaved) {
@@ -61,7 +61,7 @@ export default function DashboardPage() {
         setCourses(merged)
         setStudent(s)
         setChallenges(ch)
-        setCsrHistory(csr)
+        setCrsHistory(crs)
       })
       .finally(() => setIsLoading(false))
   }, [])
@@ -130,7 +130,7 @@ export default function DashboardPage() {
         {/* Right Sidebar */}
         <div className="space-y-5">
           {/* Cognitive Readiness — NeuroLearn-MCL (Phase 13) */}
-          <CSRTrendWidget history={csrHistory} />
+          <CRSTrendWidget history={crsHistory} />
 
           {/* Daily Challenges */}
           <motion.div
