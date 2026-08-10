@@ -13,7 +13,7 @@ and report generation into one full-stack learning workflow.
 - Multi-source video learning with YouTube, MP4, and URL support
 - Webcam attention monitoring with MediaPipe-backed scoring when ML dependencies are installed
 - Whisper transcription and FLAN-T5 question generation with dummy fallbacks for local demos
-- Cognitive Readiness Score (CSR) for adaptive difficulty selection
+- Cognitive Readiness Score (CRS) for adaptive difficulty selection
 - XP, streaks, badges, challenges, notifications, and leaderboard endpoints
 - PDF report generation and optional email delivery
 - Frontend fallback data mode when the backend is unavailable
@@ -95,11 +95,11 @@ Useful sub-guides:
 NeuroLearn/
 |-- frontend/
 |   |-- app/                  # Next.js App Router pages
-|   |   |-- dashboard/        # Course grid, gamification, CSR trend
+|   |   |-- dashboard/        # Course grid, gamification, CRS trend
 |   |   |-- discover/         # Topic-based course generation
 |   |   |-- video/            # Video player, webcam attention, transcript
 |   |   |-- assessment/       # Adaptive quiz
-|   |   |-- results/          # Score, XP, feedback, CSR breakdown
+|   |   |-- results/          # Score, XP, feedback, CRS breakdown
 |   |   |-- leaderboard/      # Global rankings
 |   |   |-- profile/          # Student profile, badges, privacy controls
 |   |   |-- login/            # Auth
@@ -113,10 +113,10 @@ NeuroLearn/
 |-- backend/
 |   |-- main.py               # FastAPI entry point
 |   |-- auth/                 # JWT auth and password security
-|   |-- config/               # CSR and runtime config
+|   |-- config/               # CRS and runtime config
 |   |-- data/                 # SQLAlchemy/Postgres and legacy data helpers
 |   |-- migrations/           # Alembic migration config
-|   |-- ml/                   # Attention, transcription, question generation, CSR
+|   |-- ml/                   # Attention, transcription, question generation, CRS
 |   |-- routers/              # API route groups
 |   |-- schemas/              # Pydantic models
 |   |-- scraping/             # Course/video discovery pipeline
@@ -291,8 +291,8 @@ Student opens /assessment
 1. Frontend requests questions from POST /api/assessment/generate.
 2. Backend chooses difficulty and generates or returns questions.
 3. Student submits answers to POST /api/assessment/submit.
-4. Backend grades the attempt, computes CSR, persists results, awards XP, and returns feedback.
-5. Frontend shows score, XP, adaptive recommendations, and CSR breakdown on /results.
+4. Backend grades the attempt, computes CRS, persists results, awards XP, and returns feedback.
+5. Frontend shows score, XP, adaptive recommendations, and CRS breakdown on /results.
 ```
 
 ## API Endpoints Reference
@@ -329,14 +329,14 @@ Student opens /assessment
 | POST | `/api/assessment/submit` | Submit answers and receive result |
 | GET | `/api/assessment/session/{session_id}` | Assessment session details |
 | GET | `/api/assessment/results/{student_id}` | Student assessment results |
-| GET | `/api/csr/{student_id}` | Latest CSR record |
-| GET | `/api/csr/{student_id}/history` | Full CSR history |
-| GET | `/api/csr/{student_id}/performance/history` | Performance component history |
-| GET | `/api/csr/{student_id}/attention/history` | Attention component history |
-| GET | `/api/csr/{student_id}/integrity/history` | Response integrity component history |
-| GET | `/api/csr/{student_id}/trend/history` | Learning trend component history |
-| GET | `/api/csr/{student_id}/complexity/history` | Content complexity component history |
-| GET | `/api/csr/{student_id}/difficulty/reason` | Latest adaptive difficulty explanation |
+| GET | `/api/CRS/{student_id}` | Latest CRS record |
+| GET | `/api/CRS/{student_id}/history` | Full CRS history |
+| GET | `/api/CRS/{student_id}/performance/history` | Performance component history |
+| GET | `/api/CRS/{student_id}/attention/history` | Attention component history |
+| GET | `/api/CRS/{student_id}/integrity/history` | Response integrity component history |
+| GET | `/api/CRS/{student_id}/trend/history` | Learning trend component history |
+| GET | `/api/CRS/{student_id}/complexity/history` | Content complexity component history |
+| GET | `/api/CRS/{student_id}/difficulty/reason` | Latest adaptive difficulty explanation |
 | GET | `/api/leaderboard` | Global rankings |
 | GET | `/api/challenges/daily` | Daily challenges |
 | POST | `/api/challenges/daily/{challenge_type}/progress` | Update challenge progress |
@@ -358,7 +358,7 @@ Student opens /assessment
 - `GET /api/transcription/{video_id}`
 - `POST /api/assessment/generate`
 - `POST /api/assessment/submit`
-- `GET /api/csr/{student_id}/history`
+- `GET /api/CRS/{student_id}/history`
 - `GET /api/leaderboard`
 - `POST /api/report/generate`
 
@@ -366,7 +366,7 @@ See `http://localhost:8000/docs` for the current schema and request bodies.
 
 ## Cognitive Readiness Score
 
-CSR is the adaptive scoring layer used by the assessment engine. It combines:
+CRS is the adaptive scoring layer used by the assessment engine. It combines:
 
 - Performance: recent assessment score history
 - Attention: gaze, head pose, and blink-normality signals
@@ -374,18 +374,18 @@ CSR is the adaptive scoring layer used by the assessment engine. It combines:
 - Learning trend: slope over recent scores
 - Content complexity: transcript readability and technical density
 
-The fused CSR value selects the next difficulty tier and is persisted so later
+The fused CRS value selects the next difficulty tier and is persisted so later
 submissions can use the learner's recent history.
 
 Default difficulty thresholds:
 
 ```text
-CSR > 0.75          hard
-0.45 <= CSR <= 0.75 medium
-CSR < 0.45          easy
+CRS > 0.75          hard
+0.45 <= CRS <= 0.75 medium
+CRS < 0.45          easy
 ```
 
-The CSR configuration lives in `backend/config/csr_config.py`.
+The CRS configuration lives in `backend/config/CRS_config.py`.
 
 ## Testing And Validation
 
@@ -404,11 +404,11 @@ cd backend
 pytest
 ```
 
-Focused CSR tests:
+Focused CRS tests:
 
 ```bash
 cd backend
-pytest tests/test_csr.py -v
+pytest tests/test_CRS.py -v
 ```
 
 ## Frontend Routes
@@ -420,7 +420,7 @@ pytest tests/test_csr.py -v
 | `/discover` | Discover | Generate a course from a topic |
 | `/video` | Video Learning | Video player, camera feed, attention monitor, transcription |
 | `/assessment` | Assessment | Adaptive quiz with timer |
-| `/results` | Results | Score, XP earned, adaptive feedback, CSR breakdown |
+| `/results` | Results | Score, XP earned, adaptive feedback, CRS breakdown |
 | `/leaderboard` | Leaderboard | Global rankings |
 | `/profile` | Profile | Student info, achievements, privacy controls |
 | `/login` | Login | Account sign-in |
