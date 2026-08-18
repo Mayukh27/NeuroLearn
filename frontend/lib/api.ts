@@ -127,16 +127,6 @@ export interface QuestionResponseEvent {
   status: "submitted" | "unanswered" | "timeout" | "refresh" | "retry"
 }
 
-export interface PrePostResponse {
-  questionId: string
-  questionIndex: number
-  correctness: boolean | null
-  responseTimeSeconds: number | null
-  score: number | null
-  startedAt: string
-  completedAt: string
-}
-
 // ── Helpers ──
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -495,35 +485,6 @@ export async function startStudySession(
   })
 }
 
-export async function savePrePostResults(
-  studySessionId: string,
-  testType: "pre" | "post",
-  responses: PrePostResponse[]
-): Promise<{ studySessionId: string; testType: string; score: number | null; learningGain: number | null }> {
-  return apiFetch(`/research/study-sessions/${studySessionId}/prepost`, {
-    method: "POST",
-    body: JSON.stringify({
-      test_type: testType,
-      responses: responses.map((response) => ({
-        question_id: response.questionId,
-        question_index: response.questionIndex,
-        correctness: response.correctness,
-        response_time_seconds: response.responseTimeSeconds,
-        score: response.score,
-        started_at: response.startedAt,
-        completed_at: response.completedAt,
-      })),
-    }),
-  })
-}
-
-export async function completeStudySession(studySessionId: string): Promise<StudySession> {
-  return apiFetch<StudySession>(`/research/study-sessions/${studySessionId}/complete`, {
-    method: "POST",
-    body: JSON.stringify({ completion_status: "completed" }),
-  })
-}
-
 export interface AssessmentSession {
   id: string
   studySessionId?: string
@@ -531,6 +492,7 @@ export interface AssessmentSession {
   condition?: "MCRF" | "LEGACY"
   courseId: string
   videoId: string
+  contributingVideoIds?: string[]
   questions: AssessmentQuestion[]
   difficulty: "easy" | "medium" | "hard"
   timeLimit: number
@@ -617,7 +579,8 @@ export async function generateAssessment(
   attentionScore: number,
   previousScore: number | null,
   transcriptText: string = "",
-  studySessionId?: string | null
+  studySessionId?: string | null,
+  contributingVideoIds: string[] = []
 ): Promise<AssessmentSession> {
   return apiFetch<AssessmentSession>(
     "/assessment/generate",
@@ -631,6 +594,7 @@ export async function generateAssessment(
         attention_score: attentionScore,
         previous_score: previousScore,
         transcript_text: transcriptText,
+        contributing_video_ids: contributingVideoIds,
       }),
     },
     async () => {
@@ -664,6 +628,40 @@ export async function generateAssessment(
       }
     }
   )
+}
+
+export async function submitAdaptiveAnswer(
+  sessionId: string,
+  questionId: string,
+  answer: string | number,
+  responseEvent: QuestionResponseEvent
+): Promise<{
+  completed: boolean
+  session: AssessmentSession
+  result?: AssessmentResult | null
+  adaptiveResponse?: {
+    nextAssessmentDifficulty: "easy" | "medium" | "hard"
+    crs?: CrsBlock
+  }
+  duplicate?: boolean
+}> {
+  return apiFetch("/assessment/answer", {
+    method: "POST",
+    body: JSON.stringify({
+      session_id: sessionId,
+      student_id: getCachedUserId() ?? "student_001",
+      question_id: questionId,
+      answer,
+      response_event: {
+        question_id: responseEvent.questionId,
+        question_index: responseEvent.questionIndex,
+        presented_at: responseEvent.presentedAt,
+        submitted_at: responseEvent.submittedAt,
+        response_time_seconds: responseEvent.responseTimeSeconds,
+        status: responseEvent.status,
+      },
+    }),
+  })
 }
 
 /**

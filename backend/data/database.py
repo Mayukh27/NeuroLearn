@@ -30,6 +30,7 @@ from data.models_orm import (
     CRSHistory, Consent, AttentionLog, DailyChallenge, Notification,
     DailyChallengeProgress, PasswordResetToken, RefreshToken,
     ResearchParticipant, StudySession, QuestionResponse, ResearchCRSDecision,
+    ResearchLegacyDecision,
     BehavioralSummary, PrePostResult, GeneratedQuestion,
 )
 
@@ -94,6 +95,10 @@ def _next_participant_id(db: Session) -> str:
     return f"participant_{max_seen + 1:03d}"
 
 
+def _assigned_condition_for_participant_id(participant_id: str) -> str:
+    return "MCRF" if (_participant_number(participant_id) % 2 == 1) else "LEGACY"
+
+
 def get_or_create_research_participant(user_id: str, db: Optional[Session] = None) -> dict:
     owns_session = db is None
     db = db or _session()
@@ -112,8 +117,14 @@ def get_or_create_research_participant(user_id: str, db: Optional[Session] = Non
                 participant_id=participant_id,
                 user_id=user_id,
                 sequence_order=sequence_order,
+                assigned_condition=_assigned_condition_for_participant_id(participant_id),
             )
             db.add(row)
+            db.flush()
+            if owns_session:
+                db.commit()
+        elif not row.assigned_condition:
+            row.assigned_condition = _assigned_condition_for_participant_id(row.participant_id)
             db.flush()
             if owns_session:
                 db.commit()
@@ -121,6 +132,7 @@ def get_or_create_research_participant(user_id: str, db: Optional[Session] = Non
             "participant_id": row.participant_id,
             "user_id": row.user_id,
             "sequence_order": row.sequence_order,
+            "assigned_condition": row.assigned_condition,
             "created_at": row.created_at.isoformat() if row.created_at else None,
         }
     finally:
@@ -151,7 +163,10 @@ def create_study_session(
     try:
         participant_doc = get_or_create_research_participant(user_id, db)
         participant = db.get(ResearchParticipant, participant_doc["participant_id"])
-        condition = _condition_for_next_session(db, participant)
+        if not participant.assigned_condition:
+            participant.assigned_condition = _assigned_condition_for_participant_id(participant.participant_id)
+            db.flush()
+        condition = participant.assigned_condition
         row = StudySession(
             participant_id=participant.participant_id,
             user_id=user_id,
@@ -185,7 +200,6 @@ def get_or_create_study_session_for_material(
             .where(
                 StudySession.user_id == user_id,
                 StudySession.course_id == course_id,
-                StudySession.video_id == video_id,
                 StudySession.completion_status == "started",
             )
             .order_by(StudySession.started_at.desc())
@@ -391,6 +405,7 @@ def save_assessment_session(session: dict):
             condition=session.get("condition"),
             course_id=session.get("course_id"),
             video_id=session.get("video_id"),
+            contributing_video_ids=session.get("contributing_video_ids", []),
             questions=session.get("questions", []),
             difficulty=session.get("difficulty", "medium"),
             starting_difficulty=session.get("starting_difficulty", session.get("difficulty", "medium")),
@@ -400,6 +415,7 @@ def save_assessment_session(session: dict):
             time_limit=session.get("time_limit", 420),
             attention_score_during_video=session.get("attention_score_during_video", 50),
             transcript_text=session.get("transcript_text"),
+            adaptive_state=session.get("adaptive_state", {}),
         )
         db.merge(row)
         db.commit()
@@ -420,12 +436,14 @@ def get_assessment_session(session_id: str) -> Optional[dict]:
             "condition": s.condition,
             "course_id": s.course_id,
             "video_id": s.video_id,
+            "contributing_video_ids": s.contributing_video_ids or [],
             "difficulty": s.difficulty, "time_limit": s.time_limit,
             "starting_difficulty": s.starting_difficulty or s.difficulty,
             "selected_difficulty": s.selected_difficulty or s.difficulty,
             "completion_status": s.completion_status,
             "attention_score_during_video": s.attention_score_during_video,
             "transcript_text": s.transcript_text,
+            "adaptive_state": s.adaptive_state or {},
         }
     finally:
         db.close()
@@ -434,12 +452,12 @@ def get_assessment_session(session_id: str) -> Optional[dict]:
 def get_canonical_assessment_session_for_study(study_session_id: str) -> Optional[dict]:
     db = _session()
     try:
-        row = db.execute(
+        rows = db.execute(
             select(AssessmentSession)
             .where(AssessmentSession.study_session_id == study_session_id)
             .order_by(AssessmentSession.created_at.desc())
-            .limit(1)
-        ).scalar_one_or_none()
+        ).scalars().all()
+        row = next((candidate for candidate in rows if candidate.questions), None) or (rows[0] if rows else None)
         if not row:
             return None
         return {
@@ -449,12 +467,14 @@ def get_canonical_assessment_session_for_study(study_session_id: str) -> Optiona
             "condition": row.condition,
             "course_id": row.course_id,
             "video_id": row.video_id,
+            "contributing_video_ids": row.contributing_video_ids or [],
             "difficulty": row.difficulty, "time_limit": row.time_limit,
             "starting_difficulty": row.starting_difficulty or row.difficulty,
             "selected_difficulty": row.selected_difficulty or row.difficulty,
             "completion_status": row.completion_status,
             "attention_score_during_video": row.attention_score_during_video,
             "transcript_text": row.transcript_text,
+            "adaptive_state": row.adaptive_state or {},
         }
     finally:
         db.close()
@@ -635,6 +655,11 @@ def save_question_responses(
     try:
         for idx, q in enumerate(questions):
             question_id = q["id"]
+            event = events.get(question_id, {})
+            try:
+                idx = int(event.get("question_index", idx))
+            except (TypeError, ValueError):
+                pass
             existing = db.execute(
                 select(QuestionResponse).where(
                     QuestionResponse.study_session_id == study_session["study_session_id"],
@@ -642,7 +667,6 @@ def save_question_responses(
                     QuestionResponse.question_id == question_id,
                 )
             ).scalar_one_or_none()
-            event = events.get(question_id, {})
             submitted_answer = answers.get(question_id)
             status = event.get("status")
             if status is None:
@@ -697,6 +721,74 @@ def save_question_responses(
     return rows_out
 
 
+def save_single_question_response(
+    *,
+    study_session: dict,
+    assessment_session: dict,
+    question: dict,
+    question_index: int,
+    answer,
+    response_event: Optional[dict],
+    submitted_at: datetime,
+) -> dict:
+    event = dict(response_event or {})
+    event.setdefault("question_id", question["id"])
+    event.setdefault("question_index", question_index)
+    rows = save_question_responses(
+        study_session=study_session,
+        assessment_session={**assessment_session, "questions": [question]},
+        answers={question["id"]: answer},
+        response_events=[event],
+        submitted_at=submitted_at,
+        total_time_spent=float(event.get("response_time_seconds") or 0),
+    )
+    return rows[0]
+
+
+def update_assessment_adaptive_state(
+    session_id: str,
+    *,
+    questions: Optional[list[dict]] = None,
+    selected_difficulty: Optional[str] = None,
+    adaptive_state: Optional[dict] = None,
+    completion_status: Optional[str] = None,
+) -> Optional[dict]:
+    db = _session()
+    try:
+        row = db.get(AssessmentSession, session_id)
+        if not row:
+            return None
+        if questions is not None:
+            row.questions = questions
+            row.number_of_questions = len(questions)
+        if selected_difficulty is not None:
+            row.selected_difficulty = selected_difficulty
+        if adaptive_state is not None:
+            row.adaptive_state = adaptive_state
+        if completion_status is not None:
+            row.completion_status = completion_status
+        db.commit()
+        db.refresh(row)
+        return {
+            "id": row.id, "student_id": row.student_id, "questions": row.questions or [],
+            "study_session_id": row.study_session_id,
+            "participant_id": row.participant_id,
+            "condition": row.condition,
+            "course_id": row.course_id,
+            "video_id": row.video_id,
+            "contributing_video_ids": row.contributing_video_ids or [],
+            "difficulty": row.difficulty, "time_limit": row.time_limit,
+            "starting_difficulty": row.starting_difficulty or row.difficulty,
+            "selected_difficulty": row.selected_difficulty or row.difficulty,
+            "completion_status": row.completion_status,
+            "attention_score_during_video": row.attention_score_during_video,
+            "transcript_text": row.transcript_text,
+            "adaptive_state": row.adaptive_state or {},
+        }
+    finally:
+        db.close()
+
+
 def save_research_crs_decision(
     *,
     study_session: dict,
@@ -707,18 +799,20 @@ def save_research_crs_decision(
     previous_difficulty: str,
     attention_score: float,
     transcript_text: Optional[str],
+    decision_index: Optional[int] = None,
 ) -> Optional[dict]:
     crs_block = adaptive_result.get("crs")
     if not crs_block or study_session["condition"] != "MCRF":
         return None
     db = _session()
     try:
-        existing = db.execute(
-            select(ResearchCRSDecision).where(
-                ResearchCRSDecision.study_session_id == study_session["study_session_id"],
-                ResearchCRSDecision.assessment_session_id == assessment_session["id"],
-            )
-        ).scalar_one_or_none()
+        existing_stmt = select(ResearchCRSDecision).where(
+            ResearchCRSDecision.study_session_id == study_session["study_session_id"],
+            ResearchCRSDecision.assessment_session_id == assessment_session["id"],
+        )
+        if decision_index is not None:
+            existing_stmt = existing_stmt.where(ResearchCRSDecision.decision_index == decision_index)
+        existing = db.execute(existing_stmt).scalar_one_or_none()
         if existing:
             return {
                 "id": existing.id,
@@ -730,7 +824,7 @@ def save_research_crs_decision(
                 ResearchCRSDecision.study_session_id == study_session["study_session_id"]
             )
         ).scalar_one()
-        decision_index = int(prior_count or 0) + 1
+        decision_index = int(decision_index or int(prior_count or 0) + 1)
         weights = crs_block.get("weights_used", {})
         components = crs_block.get("components", {})
         timing_values = [
@@ -772,6 +866,62 @@ def save_research_crs_decision(
         db.add(row)
         db.commit()
         return {"id": row.id, "decision_index": decision_index, "crs": row.crs}
+    finally:
+        db.close()
+
+
+def save_research_legacy_decision(
+    *,
+    study_session: dict,
+    assessment_session: dict,
+    adaptive_result: dict,
+    previous_scores: list[float],
+    per_question_responses: list[dict],
+    previous_difficulty: str,
+    current_score: float,
+    decision_index: Optional[int] = None,
+) -> Optional[dict]:
+    if study_session["condition"] != "LEGACY":
+        return None
+    db = _session()
+    try:
+        existing_stmt = select(ResearchLegacyDecision).where(
+            ResearchLegacyDecision.study_session_id == study_session["study_session_id"],
+            ResearchLegacyDecision.assessment_session_id == assessment_session["id"],
+        )
+        if decision_index is not None:
+            existing_stmt = existing_stmt.where(ResearchLegacyDecision.decision_index == decision_index)
+        existing = db.execute(existing_stmt).scalar_one_or_none()
+        if existing:
+            return {"id": existing.id, "decision_index": existing.decision_index}
+        prior_count = db.execute(
+            select(func.count(ResearchLegacyDecision.id)).where(
+                ResearchLegacyDecision.study_session_id == study_session["study_session_id"]
+            )
+        ).scalar_one()
+        decision_index = int(decision_index or int(prior_count or 0) + 1)
+        row = ResearchLegacyDecision(
+            study_session_id=study_session["study_session_id"],
+            assessment_session_id=assessment_session["id"],
+            participant_id=study_session["participant_id"],
+            condition=study_session["condition"],
+            decision_index=decision_index,
+            timestamp=datetime.utcnow(),
+            performance_input=current_score,
+            performance_history=previous_scores,
+            previous_difficulty=previous_difficulty,
+            selected_difficulty=adaptive_result["next_assessment_difficulty"],
+            explanation=adaptive_result.get("recommended_action"),
+            detail={
+                "performance_trend": adaptive_result.get("performance_trend"),
+                "strength_areas": adaptive_result.get("strength_areas", []),
+                "weak_areas": adaptive_result.get("weak_areas", []),
+                "question_responses": per_question_responses,
+            },
+        )
+        db.add(row)
+        db.commit()
+        return {"id": row.id, "decision_index": decision_index}
     finally:
         db.close()
 

@@ -28,6 +28,7 @@ from data.models_orm import (
     PrePostResult,
     QuestionResponse,
     ResearchCRSDecision,
+    ResearchLegacyDecision,
     ResearchParticipant,
     StudySession,
 )
@@ -36,7 +37,7 @@ from data.models_orm import (
 EXPORTS = {
     "participants": (
         ResearchParticipant,
-        ["participant_id", "sequence_order", "created_at"],
+        ["participant_id", "sequence_order", "assigned_condition", "created_at"],
     ),
     "study_sessions": (
         StudySession,
@@ -52,7 +53,7 @@ EXPORTS = {
         AssessmentSession,
         [
             "id", "study_session_id", "participant_id", "condition", "course_id",
-            "video_id", "difficulty", "starting_difficulty", "selected_difficulty",
+            "video_id", "contributing_video_ids", "difficulty", "starting_difficulty", "selected_difficulty",
             "ending_difficulty", "total_score", "percentage",
             "total_duration_seconds", "number_of_questions", "number_correct",
             "completion_status", "created_at", "completed_at",
@@ -77,6 +78,15 @@ EXPORTS = {
             "alpha", "beta", "gamma", "delta", "epsilon", "selected_difficulty",
             "previous_difficulty", "explanation", "performance_inputs",
             "timing_inputs", "trend_inputs", "complexity_inputs", "detail",
+        ],
+    ),
+    "legacy_decisions": (
+        ResearchLegacyDecision,
+        [
+            "id", "study_session_id", "assessment_session_id", "participant_id",
+            "condition", "decision_index", "timestamp", "performance_input",
+            "performance_history", "previous_difficulty", "selected_difficulty",
+            "explanation", "detail",
         ],
     ),
     "behavioral_summaries": (

@@ -278,6 +278,7 @@ class AssessmentSession(BaseModel):
     condition: Optional[Literal["MCRF", "LEGACY"]] = None
     course_id: str
     video_id: str
+    contributing_video_ids: list[str] = []
     questions: list[AssessmentQuestion]
     difficulty: Literal["easy", "medium", "hard"]
     time_limit: int  # seconds
@@ -293,6 +294,15 @@ class GenerateAssessmentRequest(BaseModel):
     attention_score: float = Field(ge=0, le=100)
     previous_score: Optional[float] = None
     transcript_text: Optional[str] = None
+    contributing_video_ids: list[str] = []
+
+
+class SubmitAdaptiveAnswerRequest(BaseModel):
+    session_id: str
+    student_id: str
+    question_id: str
+    answer: int | str
+    response_event: Optional[dict] = None
 
 
 class SubmitAssessmentRequest(BaseModel):

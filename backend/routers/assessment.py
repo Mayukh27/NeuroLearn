@@ -17,6 +17,7 @@ from schemas.models import (
     AssessmentSession,
     AssessmentResult,
     GenerateAssessmentRequest,
+    SubmitAdaptiveAnswerRequest,
     SubmitAssessmentRequest,
 )
 from ml import question_generator, adaptive_engine
@@ -33,14 +34,20 @@ from data.database import (
     get_canonical_assessment_session_for_study,
     save_generated_questions,
     save_question_responses,
+    save_single_question_response,
     save_research_crs_decision,
+    save_research_legacy_decision,
+    update_assessment_adaptive_state,
     refresh_behavioral_summary,
+    complete_study_session,
 )
 from data.db import get_db
 from data.models_orm import User
 from auth.security import get_current_user
 
 router = APIRouter(prefix="/api/assessment", tags=["Assessment"])
+
+TARGET_ADAPTIVE_ROUNDS = 12
 
 
 def _apply_xp(user: User, amount: int, db: Session) -> dict:
@@ -125,6 +132,7 @@ async def generate_assessment(
             "condition": study_session["condition"],
             "course_id": existing_session.get("course_id") or request.course_id,
             "video_id": existing_session.get("video_id") or request.video_id,
+            "contributing_video_ids": existing_session.get("contributing_video_ids", []),
             "questions": existing_session["questions"],
             "difficulty": existing_session.get("difficulty", "medium"),
             "time_limit": existing_session.get("time_limit", 420),
@@ -137,12 +145,12 @@ async def generate_assessment(
     questions = question_generator.generate_questions(
         transcript_text=transcript_text,
         difficulty=difficulty,
-        num_questions=5,
+        num_questions=1,
         topic_id=request.course_id,
     )
 
     # Step 3: Build session
-    session_id = f"session_{uuid.uuid4().hex[:12]}"
+    session_id = existing_session["id"] if existing_session else f"session_{uuid.uuid4().hex[:12]}"
     time_limits = {"easy": 600, "medium": 420, "hard": 300}
 
     session = {
@@ -152,6 +160,7 @@ async def generate_assessment(
         "condition": study_session["condition"],
         "course_id": request.course_id,
         "video_id": request.video_id,
+        "contributing_video_ids": request.contributing_video_ids or ([request.video_id] if request.video_id else []),
         "questions": questions,
         "difficulty": difficulty,
         "time_limit": time_limits.get(difficulty, 420),
@@ -165,6 +174,13 @@ async def generate_assessment(
         # to neutral on every submission (the practical consequence of CR2
         # if this field weren't threaded through).
         "transcript_text": transcript_text,
+        "adaptive_state": {
+            "target_rounds": TARGET_ADAPTIVE_ROUNDS,
+            "answered_count": 0,
+            "current_difficulty": difficulty,
+            "answers": {},
+            "round_scores": [],
+        },
     }
 
     # Save session
@@ -172,6 +188,236 @@ async def generate_assessment(
     save_generated_questions(session)
 
     return session
+
+
+def _grade_question(question: dict, answer) -> tuple[bool, float, float]:
+    correct = answer == question.get("correct_answer")
+    points = float(question.get("points", 10))
+    earned = points if correct else 0.0
+    percentage = 100.0 if correct else 0.0
+    return correct, earned, percentage
+
+
+def _adaptive_decision_for_round(
+    *,
+    request_student_id: str,
+    study_session: dict,
+    session: dict,
+    current_score: float,
+    response_time: float,
+    previous_scores: list[float],
+    previous_difficulty: str,
+    was_correct: bool,
+) -> dict:
+    if study_session["condition"] == "LEGACY":
+        return adaptive_engine._determine_difficulty_legacy(
+            student_id=request_student_id,
+            current_score=current_score,
+            attention_score=session.get("attention_score_during_video", 50),
+            time_spent=response_time,
+            time_limit=session.get("time_limit", 420) / TARGET_ADAPTIVE_ROUNDS,
+            previous_difficulty=previous_difficulty,
+            previous_scores=previous_scores,
+        )
+    return adaptive_engine.determine_difficulty(
+        student_id=request_student_id,
+        current_score=current_score,
+        attention_score=session.get("attention_score_during_video", 50),
+        time_spent=response_time,
+        time_limit=session.get("time_limit", 420) / TARGET_ADAPTIVE_ROUNDS,
+        previous_difficulty=previous_difficulty,
+        previous_scores=previous_scores,
+        transcript_text=session.get("transcript_text"),
+        was_correct=was_correct,
+    )
+
+
+@router.post("/answer")
+async def submit_adaptive_answer(
+    request: SubmitAdaptiveAnswerRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    request.student_id = current_user.id
+    session = get_assessment_session(request.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Assessment session not found")
+    if session.get("student_id") != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your session")
+    if session.get("completion_status") == "completed":
+        return {"completed": True, "session": session, "result": None}
+
+    study_session = get_or_create_active_study_session(
+        current_user.id,
+        requested_study_session_id=session["study_session_id"],
+    )
+    questions = session.get("questions", [])
+    question_index = next((idx for idx, q in enumerate(questions) if q.get("id") == request.question_id), -1)
+    if question_index < 0:
+        raise HTTPException(status_code=404, detail="Question not found in this assessment")
+
+    state = dict(session.get("adaptive_state") or {})
+    answers = dict(state.get("answers") or {})
+    if request.question_id in answers:
+        return {"completed": False, "session": session, "duplicate": True}
+
+    question = questions[question_index]
+    correct, earned_points, round_score = _grade_question(question, request.answer)
+    submitted_at = datetime.utcnow()
+    response = save_single_question_response(
+        study_session=study_session,
+        assessment_session=session,
+        question=question,
+        question_index=question_index,
+        answer=request.answer,
+        response_event=request.response_event,
+        submitted_at=submitted_at,
+    )
+
+    round_scores = list(state.get("round_scores") or [])
+    durable_scores = get_recent_scores_pct(request.student_id, limit=5)
+    previous_scores = (durable_scores + round_scores)[-5:]
+    response_time = float((request.response_event or {}).get("response_time_seconds") or 0)
+    previous_difficulty = state.get("current_difficulty") or question.get("difficulty") or session.get("selected_difficulty") or session.get("difficulty", "medium")
+    adaptive_result = _adaptive_decision_for_round(
+        request_student_id=request.student_id,
+        study_session=study_session,
+        session=session,
+        current_score=round_score,
+        response_time=response_time,
+        previous_scores=previous_scores,
+        previous_difficulty=previous_difficulty,
+        was_correct=correct,
+    )
+
+    decision_index = question_index + 1
+    if adaptive_result.get("crs"):
+        save_crs_record({
+            "student_id": request.student_id,
+            "study_session_id": study_session["study_session_id"],
+            "participant_id": study_session["participant_id"],
+            "condition": study_session["condition"],
+            "assessment_id": request.session_id,
+            "timestamp": time.time(),
+            "performance": adaptive_result["crs"]["components"]["performance"],
+            "behavioral_cue": adaptive_result["crs"]["components"]["behavioral_cue"],
+            "integrity": adaptive_result["crs"]["components"]["integrity"],
+            "trend": adaptive_result["crs"]["components"]["trend"],
+            "complexity": adaptive_result["crs"]["components"]["complexity"],
+            "crs": adaptive_result["crs"]["score"],
+            "difficulty": adaptive_result["next_assessment_difficulty"],
+            "explanation": adaptive_result["crs"]["explanation"],
+        })
+        save_research_crs_decision(
+            study_session=study_session,
+            assessment_session=session,
+            adaptive_result=adaptive_result,
+            previous_scores=previous_scores + [round_score],
+            per_question_responses=[response],
+            previous_difficulty=previous_difficulty,
+            attention_score=session.get("attention_score_during_video", 50),
+            transcript_text=session.get("transcript_text"),
+            decision_index=decision_index,
+        )
+    else:
+        save_research_legacy_decision(
+            study_session=study_session,
+            assessment_session=session,
+            adaptive_result=adaptive_result,
+            previous_scores=previous_scores + [round_score],
+            per_question_responses=[response],
+            previous_difficulty=previous_difficulty,
+            current_score=round_score,
+            decision_index=decision_index,
+        )
+
+    answers[request.question_id] = request.answer
+    round_scores.append(round_score)
+    answered_count = len(answers)
+    target_rounds = int(state.get("target_rounds") or TARGET_ADAPTIVE_ROUNDS)
+    selected_difficulty = adaptive_result["next_assessment_difficulty"]
+    completed = answered_count >= target_rounds
+
+    result = None
+    if completed:
+        total_points = sum(float(q.get("points", 10)) for q in questions[:answered_count])
+        correct_count = sum(1 for q in questions[:answered_count] if answers.get(q["id"]) == q.get("correct_answer"))
+        earned_total = sum(float(q.get("points", 10)) for q in questions[:answered_count] if answers.get(q["id"]) == q.get("correct_answer"))
+        percentage = round((correct_count / max(answered_count, 1)) * 100, 1)
+        xp_earned = int(earned_total * 1.5)
+        xp_result = _apply_xp(current_user, xp_earned, db)
+        if percentage >= 100:
+            advance_challenge_progress(current_user.id, "quiz", set_to=1)
+        result = {
+            "session_id": request.session_id,
+            "study_session_id": study_session["study_session_id"],
+            "participant_id": study_session["participant_id"],
+            "condition": study_session["condition"],
+            "student_id": request.student_id,
+            "score": percentage,
+            "total_points": int(total_points),
+            "earned_points": earned_total,
+            "percentage": percentage,
+            "xp_earned": xp_earned,
+            "total_xp": xp_result["new_xp"],
+            "new_level": xp_result["new_level"],
+            "leveled_up": xp_result["leveled_up"],
+            "time_spent": int(sum(float(r.get("response_time_seconds") or 0) for r in state.get("responses", []) + [response])),
+            "correct_answers": correct_count,
+            "total_questions": answered_count,
+            "difficulty": session.get("difficulty", "medium"),
+            "message": "Assessment completed.",
+            "next_difficulty": selected_difficulty,
+            "suggested_topics": [],
+            "timestamp": time.time(),
+            "adaptive_response": {
+                "performance_trend": adaptive_result["performance_trend"],
+                "recommended_action": adaptive_result["recommended_action"],
+                "next_assessment_difficulty": selected_difficulty,
+                "strength_areas": adaptive_result["strength_areas"],
+                "weak_areas": adaptive_result["weak_areas"],
+                "crs": adaptive_result.get("crs"),
+            },
+            "completion_status": "completed",
+        }
+        save_assessment_result(result)
+        refresh_behavioral_summary(study_session["study_session_id"])
+        complete_study_session(study_session["study_session_id"], "completed")
+    else:
+        next_question = question_generator.generate_questions(
+            transcript_text=session.get("transcript_text") or "",
+            difficulty=selected_difficulty,
+            num_questions=1,
+            topic_id=session.get("course_id") or "course_001",
+        )[0]
+        questions = questions + [next_question]
+        save_generated_questions({**session, "questions": [next_question]})
+
+    new_state = {
+        **state,
+        "target_rounds": target_rounds,
+        "answered_count": answered_count,
+        "current_difficulty": selected_difficulty,
+        "answers": answers,
+        "round_scores": round_scores,
+        "responses": list(state.get("responses") or []) + [response],
+    }
+    updated = update_assessment_adaptive_state(
+        request.session_id,
+        questions=questions,
+        selected_difficulty=selected_difficulty,
+        adaptive_state=new_state,
+        completion_status="completed" if completed else "started",
+    )
+    return {
+        "completed": completed,
+        "session": updated,
+        "result": result,
+        "adaptive_response": {
+            "next_assessment_difficulty": selected_difficulty,
+            "crs": adaptive_result.get("crs"),
+        },
+    }
 
 
 @router.post("/submit", response_model=AssessmentResult)
@@ -396,9 +642,22 @@ async def submit_assessment(
             previous_difficulty=session.get("difficulty", "medium"),
             attention_score=session.get("attention_score_during_video", 50),
             transcript_text=session.get("transcript_text"),
+            decision_index=1,
+        )
+    else:
+        save_research_legacy_decision(
+            study_session=study_session,
+            assessment_session=session,
+            adaptive_result=adaptive_result,
+            previous_scores=previous_scores + [percentage],
+            per_question_responses=question_responses,
+            previous_difficulty=session.get("difficulty", "medium"),
+            current_score=percentage,
+            decision_index=1,
         )
 
     refresh_behavioral_summary(study_session["study_session_id"])
+    complete_study_session(study_session["study_session_id"], "completed")
 
     return result
 

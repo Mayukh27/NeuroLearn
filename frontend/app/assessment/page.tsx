@@ -7,11 +7,12 @@ import { Brain, Clock, Loader2 } from "lucide-react"
 import AssessmentCard from "@/components/AssessmentCard"
 import {
   generateAssessment,
-  submitAssessment,
+  submitAdaptiveAnswer,
   type AssessmentSession,
-  type AssessmentQuestion,
   type QuestionResponseEvent,
 } from "@/lib/api"
+
+const TARGET_ADAPTIVE_ROUNDS = 12
 
 export default function AssessmentPage() {
   return (
@@ -31,17 +32,20 @@ function AssessmentContent() {
   const courseId = searchParams.get("course") || "course_001"
   const videoId = searchParams.get("video") || "v1"
   const studySessionId = searchParams.get("studySession")
+  const contributingVideoIds = (searchParams.get("videos") || videoId).split(",").filter(Boolean)
   const attentionScore = parseFloat(searchParams.get("behavioral_cue") || "70")
   const prevScore = searchParams.get("prev") ? parseFloat(searchParams.get("prev")!) : null
   const attentionDataParam = searchParams.get("attentionData") || ""
   const courseTitleParam = searchParams.get("courseTitle") || "Course"
   const videoTitleParam = searchParams.get("videoTitle") || "Video"
+  const transcriptParam = searchParams.get("transcript") || ""
 
   const [session, setSession] = useState<AssessmentSession | null>(null)
   const [currentIdx, setCurrentIdx] = useState(0)
   const [answers, setAnswers] = useState<Record<string, string | number>>({})
   const [isLoading, setIsLoading] = useState(true)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isAdvancing, setIsAdvancing] = useState(false)
   const [timeRemaining, setTimeRemaining] = useState(0)
   const [startTime] = useState(Date.now())
   const timerRef = useRef<NodeJS.Timeout | undefined>(undefined)
@@ -50,6 +54,7 @@ function AssessmentContent() {
 
   // Fetch transcript text from window (set by TranscriptionPanel)
   const getTranscriptText = (): string => {
+    if (transcriptParam.trim()) return transcriptParam
     if (typeof window !== "undefined" && (window as any).__transcriptText) {
       return (window as any).__transcriptText()
     }
@@ -67,7 +72,8 @@ function AssessmentContent() {
           attentionScore,
           prevScore,
           getTranscriptText(),
-          studySessionId
+          studySessionId,
+          contributingVideoIds
         )
         setSession(sess)
         setTimeRemaining(sess.timeLimit)
@@ -105,87 +111,63 @@ function AssessmentContent() {
 
   const handleAutoSubmit = useCallback(async () => {
     if (!session) return
-    await doSubmit()
+    const question = session.questions[currentIdx]
+    if (question && answers[question.id] !== undefined) return
   }, [session, answers])
 
   const handleAnswer = async (questionId: string, answer: string | number) => {
+    if (!session || isSubmitting || isAdvancing) return
     const presentedAt = questionPresentedAtRef.current[questionId] || Date.now()
     const submittedAt = Date.now()
+    const responseEvent: QuestionResponseEvent = {
+      questionId,
+      questionIndex: currentIdx,
+      presentedAt: new Date(presentedAt).toISOString(),
+      submittedAt: new Date(submittedAt).toISOString(),
+      responseTimeSeconds: Math.max(0, Math.round((submittedAt - presentedAt) / 100) / 10),
+      status: "submitted",
+    }
     responseEventsRef.current = [
       ...responseEventsRef.current.filter((event) => event.questionId !== questionId),
-      {
-        questionId,
-        questionIndex: currentIdx,
-        presentedAt: new Date(presentedAt).toISOString(),
-        submittedAt: new Date(submittedAt).toISOString(),
-        responseTimeSeconds: Math.max(0, Math.round((submittedAt - presentedAt) / 100) / 10),
-        status: "submitted",
-      },
+      responseEvent,
     ]
     const newAnswers = { ...answers, [questionId]: answer }
     setAnswers(newAnswers)
 
-    if (currentIdx < (session?.questions.length || 0) - 1) {
-      setCurrentIdx((i) => i + 1)
+    const isFinalQuestion = currentIdx + 1 >= TARGET_ADAPTIVE_ROUNDS
+    if (isFinalQuestion) {
+      setIsSubmitting(true)
     } else {
-      // Last question — submit
-      await doSubmit(newAnswers)
+      setIsAdvancing(true)
     }
-  }
-
-  const doSubmit = async (finalAnswers?: Record<string, string | number>) => {
-    if (!session || isSubmitting) return
-    setIsSubmitting(true)
-    clearInterval(timerRef.current)
-
-    const elapsed = Math.floor((Date.now() - startTime) / 1000)
-    const ans = finalAnswers || answers
-    const submittedIds = new Set(responseEventsRef.current.map((event) => event.questionId))
-    const completionStatus = timeRemaining <= 0 ? "timeout" : "unanswered"
-    const unansweredEvents: QuestionResponseEvent[] = []
-    ;(session.questions || []).forEach((question, index) => {
-        const presentedAt = questionPresentedAtRef.current[question.id]
-        if (submittedIds.has(question.id) || !presentedAt) return
-        unansweredEvents.push({
-          questionId: question.id,
-          questionIndex: index,
-          presentedAt: new Date(presentedAt).toISOString(),
-          responseTimeSeconds: Math.max(0, Math.round((Date.now() - presentedAt) / 100) / 10),
-          status: completionStatus,
-        })
-      })
-    const responseEvents = [...responseEventsRef.current, ...unansweredEvents]
-
     try {
-      const result = await submitAssessment(session.id, ans, session.questions, elapsed, responseEvents)
-      const resultPayload = {
-        data: JSON.stringify(result),
-        behavioral_cue: attentionDataParam,
-        course: courseTitleParam,
-        video: videoTitleParam,
-      }
-      if (session.studySessionId || studySessionId) {
-        window.sessionStorage.setItem("neurolearn_last_result", JSON.stringify(resultPayload))
+      const round = await submitAdaptiveAnswer(session.id, questionId, answer, responseEvent)
+      if (round.completed && round.result) {
+        const resultPayload = {
+          data: JSON.stringify(round.result),
+          behavioral_cue: attentionDataParam,
+          course: courseTitleParam,
+          video: videoTitleParam,
+        }
+        if (session.studySessionId || studySessionId) {
+          window.sessionStorage.setItem("neurolearn_last_result", JSON.stringify(resultPayload))
+        }
         const params = new URLSearchParams({
-          type: "post",
-          studySession: session.studySessionId || studySessionId || "",
-          course: courseId,
-          video: videoId,
+          data: JSON.stringify(round.result),
+          behavioral_cue: attentionDataParam,
+          course: courseTitleParam,
+          video: videoTitleParam,
         })
-        router.push(`/study-test?${params.toString()}`)
+        router.push(`/results?${params.toString()}`)
         return
       }
-      // Navigate to results with all data serialized (including behavioral_cue for report card)
-      const params = new URLSearchParams({
-        data: JSON.stringify(result),
-        behavioral_cue: attentionDataParam,
-        course: courseTitleParam,
-        video: videoTitleParam,
-      })
-      router.push(`/results?${params.toString()}`)
+      setSession(round.session)
+      setCurrentIdx((i) => i + 1)
     } catch (err) {
-      console.error("Submit failed:", err)
+      console.error("Adaptive answer failed:", err)
+    } finally {
       setIsSubmitting(false)
+      setIsAdvancing(false)
     }
   }
 
@@ -265,9 +247,16 @@ function AssessmentContent() {
           key={currentQ.id}
           question={currentQ}
           questionNumber={currentIdx + 1}
-          totalQuestions={session.questions.length}
+          totalQuestions={TARGET_ADAPTIVE_ROUNDS}
           timeRemaining={timeRemaining}
+          initialAnswer={answers[currentQ.id] ?? null}
+          isFinalQuestion={currentIdx + 1 >= TARGET_ADAPTIVE_ROUNDS}
+          isBusy={isAdvancing || isSubmitting}
+          canGoPrevious={currentIdx > 0}
+          canGoNext={answers[currentQ.id] !== undefined && currentIdx < session.questions.length - 1}
           onSubmit={handleAnswer}
+          onPrevious={() => setCurrentIdx((idx) => Math.max(0, idx - 1))}
+          onNext={() => setCurrentIdx((idx) => Math.min(session.questions.length - 1, idx + 1))}
         />
       </AnimatePresence>
 

@@ -20,7 +20,12 @@ def _write_csv(path: Path, rows: list[dict]):
 def _minimal_export(tmp_path: Path):
     rows_by_file = {
         "participants.csv": [
-            {"participant_id": "participant_001", "sequence_order": "MCRF_THEN_LEGACY", "created_at": "2026-08-17T00:00:00"}
+            {
+                "participant_id": "participant_001",
+                "sequence_order": "MCRF_THEN_LEGACY",
+                "assigned_condition": "MCRF",
+                "created_at": "2026-08-17T00:00:00",
+            }
         ],
         "study_sessions.csv": [
             {
@@ -38,7 +43,7 @@ def _minimal_export(tmp_path: Path):
             {
                 "id": "assess_001", "study_session_id": "study_001",
                 "participant_id": "participant_001", "condition": "MCRF",
-                "course_id": "course_001", "video_id": "v1", "difficulty": "medium",
+                "course_id": "course_001", "video_id": "v1", "contributing_video_ids": "[\"v1\"]", "difficulty": "medium",
                 "starting_difficulty": "medium", "selected_difficulty": "medium",
                 "ending_difficulty": "hard", "total_score": "10", "percentage": "100",
                 "total_duration_seconds": "30", "number_of_questions": "1",
@@ -73,6 +78,7 @@ def _minimal_export(tmp_path: Path):
                 "complexity_inputs": "{}", "detail": "{}",
             }
         ],
+        "legacy_decisions.csv": [],
         "behavioral_summaries.csv": [
             {
                 "id": "bs_001", "study_session_id": "study_001",
@@ -130,7 +136,5 @@ def test_prepost_duplicate_rows_are_validation_failures(tmp_path):
     rows = list(csv.DictReader(path.open(newline="", encoding="utf-8")))
     rows.append(dict(rows[0], id="pre_002"))
     _write_csv(path, rows)
-    # The export validator focuses on relationships; duplicate prevention is
-    # enforced in the DB helper by the natural key constraint. This assertion
-    # keeps the fixture shape explicit for retry/refresh test data.
-    assert len(rows) == 2
+    _, _, failures = validate(tmp_path)
+    assert any("duplicate pre/post response" in failure for failure in failures)

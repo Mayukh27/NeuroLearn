@@ -20,6 +20,7 @@ REQUIRED_FILES = [
     "assessments.csv",
     "question_responses.csv",
     "crs_decisions.csv",
+    "legacy_decisions.csv",
     "behavioral_summaries.csv",
     "prepost_results.csv",
     "generated_questions.csv",
@@ -60,7 +61,7 @@ def validate(export_dir: Path) -> tuple[list[str], list[str], list[str]]:
 
     for table_name in [
         "study_sessions.csv", "assessments.csv", "question_responses.csv",
-        "crs_decisions.csv", "behavioral_summaries.csv", "prepost_results.csv",
+        "crs_decisions.csv", "legacy_decisions.csv", "behavioral_summaries.csv", "prepost_results.csv",
         "generated_questions.csv",
     ]:
         for i, row in enumerate(data[table_name], start=2):
@@ -126,6 +127,15 @@ def validate(export_dir: Path) -> tuple[list[str], list[str], list[str]]:
         if row.get("condition") != "MCRF":
             warnings.append(f"WARN crs_decisions.csv:{i} CRS decision stored for non-MCRF condition")
 
+    for i, row in enumerate(data["legacy_decisions.csv"], start=2):
+        assessment_id = row.get("assessment_session_id")
+        if assessment_id not in assessments:
+            failures.append(f"FAIL legacy_decisions.csv:{i} orphan assessment_session_id={assessment_id}")
+        if row.get("condition") != "LEGACY":
+            failures.append(f"FAIL legacy_decisions.csv:{i} legacy decision stored for condition={row.get('condition')}")
+        if row.get("selected_difficulty", "") not in DIFFICULTIES:
+            failures.append(f"FAIL legacy_decisions.csv:{i} invalid selected_difficulty={row.get('selected_difficulty')}")
+
     for i, row in enumerate(data["assessments.csv"], start=2):
         if row.get("difficulty", "") not in DIFFICULTIES:
             failures.append(f"FAIL assessments.csv:{i} invalid difficulty={row.get('difficulty')}")
@@ -140,11 +150,6 @@ def validate(export_dir: Path) -> tuple[list[str], list[str], list[str]]:
             failures.append(f"FAIL study_sessions.csv missing condition for {study_id}")
         if not row.get("started_at"):
             failures.append(f"FAIL study_sessions.csv missing started_at for {study_id}")
-        requires_prepost = row.get("completion_status") == "completed"
-        if requires_prepost and row.get("pretest_score", "") == "":
-            warnings.append(f"WARN study_sessions.csv missing pretest_score for {study_id}")
-        if requires_prepost and row.get("posttest_score", "") == "":
-            warnings.append(f"WARN study_sessions.csv missing posttest_score for {study_id}")
 
     if not failures:
         passes.append("PASS no failing integrity checks")

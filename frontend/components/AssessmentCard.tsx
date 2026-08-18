@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import { Clock, ChevronRight, CheckCircle } from "lucide-react"
 import type { AssessmentQuestion } from "@/lib/api"
@@ -10,7 +10,14 @@ interface AssessmentCardProps {
   questionNumber: number
   totalQuestions: number
   timeRemaining?: number
+  initialAnswer?: string | number | null
+  isFinalQuestion?: boolean
+  isBusy?: boolean
+  canGoPrevious?: boolean
+  canGoNext?: boolean
   onSubmit: (questionId: string, answer: string | number) => void
+  onPrevious?: () => void
+  onNext?: () => void
 }
 
 export default function AssessmentCard({
@@ -18,15 +25,32 @@ export default function AssessmentCard({
   questionNumber,
   totalQuestions,
   timeRemaining,
+  initialAnswer = null,
+  isFinalQuestion = false,
+  isBusy = false,
+  canGoPrevious = false,
+  canGoNext = false,
   onSubmit,
+  onPrevious,
+  onNext,
 }: AssessmentCardProps) {
-  const [selected, setSelected] = useState<number | null>(null)
+  const [selected, setSelected] = useState<number | null>(
+    typeof initialAnswer === "number" ? initialAnswer : null
+  )
   const progressPct = (questionNumber / totalQuestions) * 100
+  const hasSavedAnswer = initialAnswer !== null && initialAnswer !== undefined
+
+  useEffect(() => {
+    setSelected(typeof initialAnswer === "number" ? initialAnswer : null)
+  }, [initialAnswer, question.id])
 
   const handleSubmit = () => {
+    if (hasSavedAnswer && canGoNext) {
+      onNext?.()
+      return
+    }
     if (selected !== null) {
       onSubmit(question.id, selected)
-      setSelected(null)
     }
   }
 
@@ -141,19 +165,31 @@ export default function AssessmentCard({
       </div>
 
       {/* Submit button */}
+      <div className="flex items-center gap-3">
+        <motion.button
+          whileHover={canGoPrevious ? { scale: 1.01 } : {}}
+          whileTap={canGoPrevious ? { scale: 0.99 } : {}}
+          onClick={onPrevious}
+          disabled={!canGoPrevious || isBusy}
+          className="px-4 py-3.5 rounded-xl font-bold text-sm bg-[var(--bg-elevated)] text-[var(--text-secondary)] border border-[var(--border-subtle)] disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          Previous
+        </motion.button>
       <motion.button
-        whileHover={selected !== null ? { scale: 1.01 } : {}}
-        whileTap={selected !== null ? { scale: 0.99 } : {}}
+          whileHover={(selected !== null || canGoNext) && !isBusy ? { scale: 1.01 } : {}}
+          whileTap={(selected !== null || canGoNext) && !isBusy ? { scale: 0.99 } : {}}
         onClick={handleSubmit}
-        disabled={selected === null}
-        className={`w-full py-3.5 rounded-xl font-bold text-sm transition-all duration-300 flex items-center justify-center gap-2
-          ${selected !== null
+          disabled={(selected === null && !canGoNext) || isBusy}
+          className={`flex-1 py-3.5 rounded-xl font-bold text-sm transition-all duration-300 flex items-center justify-center gap-2
+          ${(selected !== null || canGoNext) && !isBusy
             ? "bg-gradient-to-r from-violet-500 to-purple-600 text-white hover:shadow-xl hover:shadow-violet-500/20 cursor-pointer"
             : "bg-[var(--bg-elevated)] text-[var(--text-muted)] cursor-not-allowed border border-[var(--border-subtle)]"
           }
         `}
       >
-        {questionNumber === totalQuestions ? (
+          {isBusy ? (
+            "Loading..."
+          ) : isFinalQuestion ? (
           <>
             <CheckCircle size={16} />
             Submit Assessment
@@ -165,6 +201,7 @@ export default function AssessmentCard({
           </>
         )}
       </motion.button>
+      </div>
     </motion.div>
   )
 }

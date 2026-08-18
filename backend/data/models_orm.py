@@ -103,6 +103,7 @@ class AssessmentSession(Base):
     condition = Column(String, nullable=True, index=True)
     course_id = Column(String, nullable=True, index=True)
     video_id = Column(String, nullable=True, index=True)
+    contributing_video_ids = Column(JSONB, default=list)
     questions = Column(JSONB, default=list)
     difficulty = Column(String, default="medium")
     starting_difficulty = Column(String, nullable=True)
@@ -118,6 +119,7 @@ class AssessmentSession(Base):
     time_limit = Column(Integer, default=420)
     attention_score_during_video = Column(Float, default=50)
     transcript_text = Column(Text, nullable=True)
+    adaptive_state = Column(JSONB, default=dict)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -190,6 +192,7 @@ class ResearchParticipant(Base):
     participant_id = Column(String, primary_key=True)
     user_id = Column(String, ForeignKey("users.id"), unique=True, nullable=False, index=True)
     sequence_order = Column(String, nullable=False)
+    assigned_condition = Column(String, nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -281,6 +284,30 @@ class ResearchCRSDecision(Base):
         UniqueConstraint(
             "study_session_id", "assessment_session_id", "decision_index",
             name="uq_research_crs_decision_index",
+        ),
+    )
+
+
+class ResearchLegacyDecision(Base):
+    __tablename__ = "research_legacy_decisions"
+    id = Column(String, primary_key=True, default=_uuid)
+    study_session_id = Column(String, ForeignKey("study_sessions.study_session_id"), nullable=False, index=True)
+    assessment_session_id = Column(String, ForeignKey("assessment_sessions.id"), nullable=False, index=True)
+    participant_id = Column(String, ForeignKey("research_participants.participant_id"), nullable=False, index=True)
+    condition = Column(String, nullable=False, index=True)
+    decision_index = Column(Integer, nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    performance_input = Column(Float, nullable=True)
+    performance_history = Column(JSONB, default=list)
+    previous_difficulty = Column(String, nullable=True)
+    selected_difficulty = Column(String, nullable=False)
+    explanation = Column(Text, nullable=True)
+    detail = Column(JSONB, default=dict)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "study_session_id", "assessment_session_id", "decision_index",
+            name="uq_research_legacy_decision_index",
         ),
     )
 

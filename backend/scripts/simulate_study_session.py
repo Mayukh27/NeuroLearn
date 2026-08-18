@@ -9,11 +9,14 @@ This verifies joins and instrumentation plumbing. It is not experimental data.
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import select
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from data.database import (
     complete_study_session,
@@ -23,9 +26,9 @@ from data.database import (
     save_assessment_session,
     save_crs_record,
     save_generated_questions,
-    save_prepost_results,
     save_question_responses,
     save_research_crs_decision,
+    save_research_legacy_decision,
     set_consent,
 )
 from data.db import SessionLocal
@@ -106,9 +109,6 @@ def run_simulation(export_dir: Path) -> int:
     user = _get_or_create_user()
 
     study = create_study_session(user.id, course_id="course_001", module_id="course_001", video_id="v1")
-    if study["condition"] != "MCRF":
-        complete_study_session(study["study_session_id"], "simulation_skipped_counterbalance")
-        study = create_study_session(user.id, course_id="course_001", module_id="course_001", video_id="v1")
 
     webcam_session_id = f"webcam_sim_{int(time.time())}"
     set_consent({
@@ -203,17 +203,28 @@ def run_simulation(export_dir: Path) -> int:
 
     percentage = 66.7
     previous_scores = [55, 62, percentage]
-    adaptive = adaptive_engine.determine_difficulty(
-        student_id=user.id,
-        current_score=percentage,
-        attention_score=82,
-        time_spent=25,
-        time_limit=60,
-        previous_difficulty="medium",
-        previous_scores=previous_scores[:-1],
-        transcript_text=session["transcript_text"],
-        was_correct=True,
-    )
+    if study["condition"] == "LEGACY":
+        adaptive = adaptive_engine._determine_difficulty_legacy(
+            student_id=user.id,
+            current_score=percentage,
+            attention_score=82,
+            time_spent=77,
+            time_limit=session["time_limit"],
+            previous_difficulty="medium",
+            previous_scores=previous_scores[:-1],
+        )
+    else:
+        adaptive = adaptive_engine.determine_difficulty(
+            student_id=user.id,
+            current_score=percentage,
+            attention_score=82,
+            time_spent=25,
+            time_limit=60,
+            previous_difficulty="medium",
+            previous_scores=previous_scores[:-1],
+            transcript_text=session["transcript_text"],
+            was_correct=True,
+        )
     save_assessment_result({
         "session_id": session["id"],
         "study_session_id": study["study_session_id"],
@@ -231,33 +242,44 @@ def run_simulation(export_dir: Path) -> int:
         "next_difficulty": adaptive["next_assessment_difficulty"],
         "completion_status": "completed",
     })
-    crs = adaptive["crs"]
-    save_crs_record({
-        "student_id": user.id,
-        "study_session_id": study["study_session_id"],
-        "participant_id": study["participant_id"],
-        "condition": study["condition"],
-        "assessment_id": session["id"],
-        "timestamp": time.time(),
-        "performance": crs["components"]["performance"],
-        "behavioral_cue": crs["components"]["behavioral_cue"],
-        "integrity": crs["components"]["integrity"],
-        "trend": crs["components"]["trend"],
-        "complexity": crs["components"]["complexity"],
-        "crs": crs["score"],
-        "difficulty": adaptive["next_assessment_difficulty"],
-        "explanation": crs["explanation"],
-    })
-    save_research_crs_decision(
-        study_session=study,
-        assessment_session=session,
-        adaptive_result=adaptive,
-        previous_scores=previous_scores,
-        per_question_responses=responses,
-        previous_difficulty="medium",
-        attention_score=82,
-        transcript_text=session["transcript_text"],
-    )
+    if study["condition"] == "MCRF":
+        crs = adaptive["crs"]
+        save_crs_record({
+            "student_id": user.id,
+            "study_session_id": study["study_session_id"],
+            "participant_id": study["participant_id"],
+            "condition": study["condition"],
+            "assessment_id": session["id"],
+            "timestamp": time.time(),
+            "performance": crs["components"]["performance"],
+            "behavioral_cue": crs["components"]["behavioral_cue"],
+            "integrity": crs["components"]["integrity"],
+            "trend": crs["components"]["trend"],
+            "complexity": crs["components"]["complexity"],
+            "crs": crs["score"],
+            "difficulty": adaptive["next_assessment_difficulty"],
+            "explanation": crs["explanation"],
+        })
+        save_research_crs_decision(
+            study_session=study,
+            assessment_session=session,
+            adaptive_result=adaptive,
+            previous_scores=previous_scores,
+            per_question_responses=responses,
+            previous_difficulty="medium",
+            attention_score=82,
+            transcript_text=session["transcript_text"],
+        )
+    else:
+        save_research_legacy_decision(
+            study_session=study,
+            assessment_session=session,
+            adaptive_result=adaptive,
+            previous_scores=previous_scores,
+            per_question_responses=responses,
+            previous_difficulty="medium",
+            current_score=percentage,
+        )
 
     set_consent({
         "student_id": user.id,
@@ -273,14 +295,6 @@ def run_simulation(export_dir: Path) -> int:
     if neutral_after_revocation != 0.5:
         raise AssertionError("B did not become neutral after revocation")
 
-    save_prepost_results(study["study_session_id"], "pre", [
-        {"question_id": "pre_1", "question_index": 0, "correctness": True, "response_time_seconds": 20, "score": 1},
-        {"question_id": "pre_2", "question_index": 1, "correctness": False, "response_time_seconds": 30, "score": 0},
-    ])
-    save_prepost_results(study["study_session_id"], "post", [
-        {"question_id": "post_1", "question_index": 0, "correctness": True, "response_time_seconds": 18, "score": 1},
-        {"question_id": "post_2", "question_index": 1, "correctness": True, "response_time_seconds": 25, "score": 1},
-    ])
     refresh_behavioral_summary(study["study_session_id"])
     complete_study_session(study["study_session_id"], "completed")
 

@@ -64,6 +64,7 @@ function VideoContent() {
   const [webcamSessionId, setWebcamSessionId] = useState(() => newWebcamSessionId())
   const [studySession, setStudySession] = useState<StudySession | null>(null)
   const [behavioralCueGranted, setBehavioralCueGranted] = useState<boolean | null>(null)
+  const [completedVideoTranscripts, setCompletedVideoTranscripts] = useState<Record<string, string>>({})
 
   // Behavioral Cue state
   const [latestAttention, setLatestAttention] = useState<AttentionSnapshotResponse | null>(null)
@@ -125,7 +126,7 @@ function VideoContent() {
     let cancelled = false
     ;(async () => {
       try {
-        const session = await startStudySession(course.id, selectedVideo.id, course.id)
+        const session = await startStudySession(course.id, undefined, course.id)
         if (!cancelled) setStudySession(session)
       } catch (err) {
         console.error("Failed to start study session:", err)
@@ -150,7 +151,16 @@ function VideoContent() {
   const handleVideoEnd = useCallback(() => {
     setVideoEnded(true)
     setIsPlaying(false)
-  }, [])
+    if (selectedVideo?.id) {
+      const transcriptText = typeof window !== "undefined" && (window as any).__transcriptText
+        ? (window as any).__transcriptText()
+        : ""
+      setCompletedVideoTranscripts((prev) => ({
+        ...prev,
+        [selectedVideo.id]: transcriptText,
+      }))
+    }
+  }, [selectedVideo?.id])
 
   // FIXED: Use functional updates — no stale closure on attentionHistory
   const handleAttentionUpdate = useCallback((snapshot: AttentionSnapshotResponse) => {
@@ -190,6 +200,7 @@ function VideoContent() {
     setSessionAvgAttention(0)
     setBehavioralCueGranted(null)
     setStudySession(null)
+    setCompletedVideoTranscripts({})
     setWebcamSessionId(newWebcamSessionId())
     setShowCustomInput(false)
   }
@@ -207,6 +218,7 @@ function VideoContent() {
       avgBlinkRate: behavioralCueGranted === false ? 0 : latestAttention?.modelResponse?.blinkRate ?? 16,
     }
     const params = new URLSearchParams({
+      videos: Object.keys(completedVideoTranscripts).join(","),
       course: course?.id || "custom",
       video: selectedVideo?.id || "custom",
       ...(studySession?.studySessionId ? { studySession: studySession.studySessionId } : {}),
@@ -214,6 +226,9 @@ function VideoContent() {
       videoTitle: selectedVideo?.title || "Video Session",
       behavioral_cue: Math.round(effectiveBehavioralCue).toString(),
       attentionData: JSON.stringify(attentionSummary),
+      transcript: Object.entries(completedVideoTranscripts)
+        .map(([id, text]) => `[Video ${id}]\n${text}`)
+        .join("\n\n"),
     })
     router.push(`/assessment?${params.toString()}`)
   }
