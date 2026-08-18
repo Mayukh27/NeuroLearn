@@ -20,8 +20,10 @@ import VideoLinkSelector from "@/components/VideoLinkSelector"
 import {
   fetchCourseById,
   fetchCourses,
+  startStudySession,
   type Course,
   type VideoLink,
+  type StudySession,
 } from "@/lib/api"
 
 export default function VideoPage() {
@@ -48,6 +50,7 @@ function VideoContent() {
   const searchParams = useSearchParams()
   const courseIdParam = searchParams.get("course")
   const videoIdParam = searchParams.get("video")
+  const studySessionParam = searchParams.get("studySession")
 
   const [course, setCourse] = useState<Course | null>(null)
   const [selectedVideo, setSelectedVideo] = useState<VideoLink | null>(null)
@@ -59,6 +62,7 @@ function VideoContent() {
   const [customUrl, setCustomUrl] = useState("")
   const [showCustomInput, setShowCustomInput] = useState(false)
   const [webcamSessionId, setWebcamSessionId] = useState(() => newWebcamSessionId())
+  const [studySession, setStudySession] = useState<StudySession | null>(null)
   const [behavioralCueGranted, setBehavioralCueGranted] = useState<boolean | null>(null)
 
   // Behavioral Cue state
@@ -105,6 +109,34 @@ function VideoContent() {
     load()
   }, [courseIdParam, videoIdParam])
 
+  useEffect(() => {
+    if (!course || !selectedVideo) return
+    if (studySessionParam) {
+      setStudySession({
+        studySessionId: studySessionParam,
+        participantId: "",
+        condition: "MCRF",
+        sequenceOrder: "MCRF_THEN_LEGACY",
+        completionStatus: "started",
+        experimentVersion: "full-study-v1",
+      })
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const session = await startStudySession(course.id, selectedVideo.id, course.id)
+        if (!cancelled) setStudySession(session)
+      } catch (err) {
+        console.error("Failed to start study session:", err)
+        if (!cancelled) setStudySession(null)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [course?.id, selectedVideo?.id, studySessionParam])
+
   const handleTimeUpdate = useCallback((ct: number, dur: number) => {
     setCurrentTime(ct)
     setVideoDuration(dur)
@@ -141,6 +173,7 @@ function VideoContent() {
     setLatestAttention(null)
     setSessionAvgAttention(0)
     setBehavioralCueGranted(null)
+    setStudySession(null)
     setWebcamSessionId(newWebcamSessionId())
     setCustomUrl("")
     setShowCustomInput(false)
@@ -156,6 +189,7 @@ function VideoContent() {
     setLatestAttention(null)
     setSessionAvgAttention(0)
     setBehavioralCueGranted(null)
+    setStudySession(null)
     setWebcamSessionId(newWebcamSessionId())
     setShowCustomInput(false)
   }
@@ -175,6 +209,7 @@ function VideoContent() {
     const params = new URLSearchParams({
       course: course?.id || "custom",
       video: selectedVideo?.id || "custom",
+      ...(studySession?.studySessionId ? { studySession: studySession.studySessionId } : {}),
       courseTitle: course?.title || "Custom Video",
       videoTitle: selectedVideo?.title || "Video Session",
       behavioral_cue: Math.round(effectiveBehavioralCue).toString(),
@@ -317,6 +352,7 @@ function VideoContent() {
             videoId={selectedVideo?.id || "custom"}
             studentId="student_001"
             sessionId={webcamSessionId}
+            studySessionId={studySession?.studySessionId}
             onConsentChange={(granted) => {
               setBehavioralCueGranted(granted)
               if (!granted) {

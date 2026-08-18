@@ -10,6 +10,7 @@ Endpoints:
 
 import uuid
 import time
+from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 from schemas.models import (
@@ -28,6 +29,12 @@ from data.database import (
     save_crs_record,
     advance_challenge_progress,
     apply_xp,
+    get_or_create_active_study_session,
+    get_canonical_assessment_session_for_study,
+    save_generated_questions,
+    save_question_responses,
+    save_research_crs_decision,
+    refresh_behavioral_summary,
 )
 from data.db import get_db
 from data.models_orm import User
@@ -76,15 +83,54 @@ async def generate_assessment(
     # student_id and read/act on someone else's data" gap.
     request.student_id = current_user.id
 
-    # Step 1: Determine difficulty
-    difficulty_result = adaptive_engine.get_initial_difficulty(
-        student_id=request.student_id,
-        attention_score=request.attention_score,
-        previous_score=request.previous_score,
-    )
+    try:
+        study_session = get_or_create_active_study_session(
+            current_user.id,
+            course_id=request.course_id,
+            video_id=request.video_id,
+            requested_study_session_id=request.study_session_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    # Camera is optional: an opt-out/no-camera session uses neutral B=50.
+    attention_score = request.attention_score
+    if attention_score is None:
+        attention_score = 50
+
+    # Step 1: Determine difficulty. The assigned server-side condition decides
+    # which policy runs; clients cannot switch policy by request parameters.
+    if study_session["condition"] == "LEGACY":
+        difficulty_result = adaptive_engine._get_initial_difficulty_legacy(
+            student_id=request.student_id,
+            attention_score=attention_score,
+            previous_score=request.previous_score,
+        )
+    else:
+        difficulty_result = adaptive_engine.get_initial_difficulty(
+            student_id=request.student_id,
+            attention_score=attention_score,
+            previous_score=request.previous_score,
+        )
 
     difficulty = difficulty_result["difficulty"]
     adaptive_metadata = difficulty_result["adaptive_metadata"]
+
+    existing_session = get_canonical_assessment_session_for_study(study_session["study_session_id"])
+    if existing_session and existing_session.get("questions"):
+        return {
+            "id": existing_session["id"],
+            "study_session_id": study_session["study_session_id"],
+            "participant_id": study_session["participant_id"],
+            "condition": study_session["condition"],
+            "course_id": existing_session.get("course_id") or request.course_id,
+            "video_id": existing_session.get("video_id") or request.video_id,
+            "questions": existing_session["questions"],
+            "difficulty": existing_session.get("difficulty", "medium"),
+            "time_limit": existing_session.get("time_limit", 420),
+            "attention_score_during_video": existing_session.get("attention_score_during_video", attention_score),
+            "adaptive_metadata": adaptive_metadata,
+        }
 
     # Step 2: Generate questions
     transcript_text = request.transcript_text or ""
@@ -101,12 +147,15 @@ async def generate_assessment(
 
     session = {
         "id": session_id,
+        "study_session_id": study_session["study_session_id"],
+        "participant_id": study_session["participant_id"],
+        "condition": study_session["condition"],
         "course_id": request.course_id,
         "video_id": request.video_id,
         "questions": questions,
         "difficulty": difficulty,
         "time_limit": time_limits.get(difficulty, 420),
-        "attention_score_during_video": request.attention_score,
+        "attention_score_during_video": attention_score,
         "adaptive_metadata": adaptive_metadata,
         "student_id": request.student_id,
         "created_at": time.time(),
@@ -120,6 +169,7 @@ async def generate_assessment(
 
     # Save session
     save_assessment_session(session)
+    save_generated_questions(session)
 
     return session
 
@@ -153,6 +203,22 @@ async def submit_assessment(
     session = get_assessment_session(request.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Assessment session not found")
+    if session.get("student_id") != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your session")
+    if not session.get("study_session_id"):
+        try:
+            study_session = get_or_create_active_study_session(
+                current_user.id,
+                course_id=session.get("course_id"),
+                video_id=session.get("video_id"),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+    else:
+        study_session = get_or_create_active_study_session(
+            current_user.id,
+            requested_study_session_id=session["study_session_id"],
+        )
 
     questions = session.get("questions", [])
 
@@ -196,18 +262,47 @@ async def submit_assessment(
     # timing alone, per the CR3 fix), only the human-readable reason string.
     was_correct = percentage >= 50.0
 
-    # Run adaptive engine (CRS-driven — see ml/adaptive_engine.py)
-    adaptive_result = adaptive_engine.determine_difficulty(
-        student_id=request.student_id,
-        current_score=percentage,
-        attention_score=session.get("attention_score_during_video", 50),
-        time_spent=request.time_spent,
-        time_limit=session.get("time_limit", 420),
-        previous_difficulty=session.get("difficulty", "medium"),
-        previous_scores=previous_scores,
-        transcript_text=session.get("transcript_text"),
-        was_correct=was_correct,
+    submitted_at = datetime.utcnow()
+    question_responses = save_question_responses(
+        study_session=study_session,
+        assessment_session=session,
+        answers=request.answers,
+        response_events=request.response_events,
+        submitted_at=submitted_at,
+        total_time_spent=request.time_spent,
     )
+    timing_values = [
+        r["response_time_seconds"]
+        for r in question_responses
+        if r.get("response_time_seconds") is not None
+    ]
+    crs_time_spent = sum(timing_values) / max(len(timing_values), 1) if timing_values else request.time_spent
+    per_question_limit = session.get("time_limit", 420) / max(len(questions), 1)
+
+    # Run adaptive engine. Server-side condition controls whether MCRF or the
+    # preserved legacy cascade is used.
+    if study_session["condition"] == "LEGACY":
+        adaptive_result = adaptive_engine._determine_difficulty_legacy(
+            student_id=request.student_id,
+            current_score=percentage,
+            attention_score=session.get("attention_score_during_video", 50),
+            time_spent=request.time_spent,
+            time_limit=session.get("time_limit", 420),
+            previous_difficulty=session.get("difficulty", "medium"),
+            previous_scores=previous_scores,
+        )
+    else:
+        adaptive_result = adaptive_engine.determine_difficulty(
+            student_id=request.student_id,
+            current_score=percentage,
+            attention_score=session.get("attention_score_during_video", 50),
+            time_spent=crs_time_spent,
+            time_limit=per_question_limit,
+            previous_difficulty=session.get("difficulty", "medium"),
+            previous_scores=previous_scores,
+            transcript_text=session.get("transcript_text"),
+            was_correct=was_correct,
+        )
 
     # Generate result message
     if percentage >= 90:
@@ -231,6 +326,9 @@ async def submit_assessment(
 
     result = {
         "session_id": request.session_id,
+        "study_session_id": study_session["study_session_id"],
+        "participant_id": study_session["participant_id"],
+        "condition": study_session["condition"],
         "student_id": request.student_id,
         "score": percentage,
         "total_points": total_points,
@@ -275,6 +373,9 @@ async def submit_assessment(
     if crs_block:
         save_crs_record({
             "student_id": request.student_id,
+            "study_session_id": study_session["study_session_id"],
+            "participant_id": study_session["participant_id"],
+            "condition": study_session["condition"],
             "assessment_id": request.session_id,
             "timestamp": result["timestamp"],
             "performance": crs_block["components"]["performance"],
@@ -286,6 +387,18 @@ async def submit_assessment(
             "difficulty": adaptive_result["next_assessment_difficulty"],
             "explanation": crs_block["explanation"],
         })
+        save_research_crs_decision(
+            study_session=study_session,
+            assessment_session=session,
+            adaptive_result=adaptive_result,
+            previous_scores=previous_scores + [percentage],
+            per_question_responses=question_responses,
+            previous_difficulty=session.get("difficulty", "medium"),
+            attention_score=session.get("attention_score_during_video", 50),
+            transcript_text=session.get("transcript_text"),
+        )
+
+    refresh_behavioral_summary(study_session["study_session_id"])
 
     return result
 

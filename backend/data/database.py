@@ -16,9 +16,12 @@ routers/auth.py — new).
 """
 from typing import Optional
 from datetime import datetime, date, timedelta
+import statistics
+import subprocess
+from pathlib import Path
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 from data.db import SessionLocal
@@ -26,9 +29,15 @@ from data.models_orm import (
     User, Course, AutoCourse, AssessmentSession, AssessmentResult,
     CRSHistory, Consent, AttentionLog, DailyChallenge, Notification,
     DailyChallengeProgress, PasswordResetToken, RefreshToken,
+    ResearchParticipant, StudySession, QuestionResponse, ResearchCRSDecision,
+    BehavioralSummary, PrePostResult, GeneratedQuestion,
 )
 
 XP_PER_LEVEL = 100
+EXPERIMENT_VERSION = "full-study-v1"
+CRS_CONFIG_VERSION = "crs-equal-weights-v1"
+VALID_STUDY_CONDITIONS = {"MCRF", "LEGACY"}
+VALID_SEQUENCE_ORDERS = {"MCRF_THEN_LEGACY", "LEGACY_THEN_MCRF"}
 
 
 def level_from_xp(xp: int) -> int:
@@ -57,6 +66,222 @@ def _session() -> Session:
     original TinyDB functions' style of "just do the operation and
     return" with no explicit session threading through every call site)."""
     return SessionLocal()
+
+
+def current_application_version() -> Optional[str]:
+    try:
+        repo_root = Path(__file__).resolve().parents[2]
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=repo_root,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return None
+
+
+def _participant_number(participant_id: str) -> int:
+    try:
+        return int(participant_id.rsplit("_", 1)[1])
+    except Exception:
+        return 0
+
+
+def _next_participant_id(db: Session) -> str:
+    rows = db.execute(select(ResearchParticipant.participant_id)).all()
+    max_seen = max((_participant_number(r[0]) for r in rows), default=0)
+    return f"participant_{max_seen + 1:03d}"
+
+
+def get_or_create_research_participant(user_id: str, db: Optional[Session] = None) -> dict:
+    owns_session = db is None
+    db = db or _session()
+    try:
+        row = db.execute(
+            select(ResearchParticipant).where(ResearchParticipant.user_id == user_id)
+        ).scalar_one_or_none()
+        if row is None:
+            participant_id = _next_participant_id(db)
+            sequence_order = (
+                "MCRF_THEN_LEGACY"
+                if (_participant_number(participant_id) % 2 == 1)
+                else "LEGACY_THEN_MCRF"
+            )
+            row = ResearchParticipant(
+                participant_id=participant_id,
+                user_id=user_id,
+                sequence_order=sequence_order,
+            )
+            db.add(row)
+            db.flush()
+            if owns_session:
+                db.commit()
+        return {
+            "participant_id": row.participant_id,
+            "user_id": row.user_id,
+            "sequence_order": row.sequence_order,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+    finally:
+        if owns_session:
+            db.close()
+
+
+def _condition_for_next_session(db: Session, participant: ResearchParticipant) -> str:
+    count = db.execute(
+        select(func.count(StudySession.study_session_id))
+        .where(StudySession.participant_id == participant.participant_id)
+    ).scalar_one()
+    first, second = (
+        ("MCRF", "LEGACY")
+        if participant.sequence_order == "MCRF_THEN_LEGACY"
+        else ("LEGACY", "MCRF")
+    )
+    return first if int(count or 0) % 2 == 0 else second
+
+
+def create_study_session(
+    user_id: str,
+    course_id: Optional[str] = None,
+    video_id: Optional[str] = None,
+    module_id: Optional[str] = None,
+) -> dict:
+    db = _session()
+    try:
+        participant_doc = get_or_create_research_participant(user_id, db)
+        participant = db.get(ResearchParticipant, participant_doc["participant_id"])
+        condition = _condition_for_next_session(db, participant)
+        row = StudySession(
+            participant_id=participant.participant_id,
+            user_id=user_id,
+            condition=condition,
+            sequence_order=participant.sequence_order,
+            course_id=course_id,
+            module_id=module_id or course_id,
+            video_id=video_id,
+            experiment_version=EXPERIMENT_VERSION,
+            application_version=current_application_version(),
+            crs_config_version=CRS_CONFIG_VERSION,
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return study_session_to_dict(row)
+    finally:
+        db.close()
+
+
+def get_or_create_study_session_for_material(
+    user_id: str,
+    course_id: Optional[str] = None,
+    video_id: Optional[str] = None,
+    module_id: Optional[str] = None,
+) -> dict:
+    db = _session()
+    try:
+        existing = db.execute(
+            select(StudySession)
+            .where(
+                StudySession.user_id == user_id,
+                StudySession.course_id == course_id,
+                StudySession.video_id == video_id,
+                StudySession.completion_status == "started",
+            )
+            .order_by(StudySession.started_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing:
+            return study_session_to_dict(existing)
+    finally:
+        db.close()
+    return create_study_session(user_id, course_id=course_id, video_id=video_id, module_id=module_id)
+
+
+def get_study_session(study_session_id: str) -> Optional[dict]:
+    db = _session()
+    try:
+        row = db.get(StudySession, study_session_id)
+        return study_session_to_dict(row) if row else None
+    finally:
+        db.close()
+
+
+def get_or_create_active_study_session(
+    user_id: str,
+    course_id: Optional[str] = None,
+    video_id: Optional[str] = None,
+    requested_study_session_id: Optional[str] = None,
+) -> dict:
+    db = _session()
+    try:
+        if requested_study_session_id:
+            existing = db.get(StudySession, requested_study_session_id)
+            if not existing or existing.user_id != user_id:
+                raise ValueError("Invalid study_session_id for current user")
+            return study_session_to_dict(existing)
+
+        existing = db.execute(
+            select(StudySession)
+            .where(
+                StudySession.user_id == user_id,
+                StudySession.completion_status == "started",
+            )
+            .order_by(StudySession.started_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing:
+            if course_id and not existing.course_id:
+                existing.course_id = course_id
+            if video_id and not existing.video_id:
+                existing.video_id = video_id
+            db.commit()
+            return study_session_to_dict(existing)
+    finally:
+        db.close()
+    return create_study_session(user_id, course_id=course_id, video_id=video_id)
+
+
+def complete_study_session(study_session_id: str, status: str = "completed") -> Optional[dict]:
+    db = _session()
+    try:
+        row = db.get(StudySession, study_session_id)
+        if not row:
+            return None
+        row.completion_status = status
+        row.ended_at = datetime.utcnow()
+        if row.pretest_score is not None and row.posttest_score is not None:
+            row.learning_gain = row.posttest_score - row.pretest_score
+        db.commit()
+        db.refresh(row)
+        return study_session_to_dict(row)
+    finally:
+        db.close()
+
+
+def study_session_to_dict(row: StudySession) -> dict:
+    return {
+        "study_session_id": row.study_session_id,
+        "participant_id": row.participant_id,
+        "user_id": row.user_id,
+        "condition": row.condition,
+        "sequence_order": row.sequence_order,
+        "course_id": row.course_id,
+        "module_id": row.module_id,
+        "video_id": row.video_id,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "ended_at": row.ended_at.isoformat() if row.ended_at else None,
+        "completion_status": row.completion_status,
+        "experiment_version": row.experiment_version,
+        "application_version": row.application_version,
+        "crs_config_version": row.crs_config_version,
+        "pretest_score": row.pretest_score,
+        "posttest_score": row.posttest_score,
+        "learning_gain": row.learning_gain,
+        "camera_used": row.camera_used,
+        "camera_opted_out": row.camera_opted_out,
+        "camera_revoked": row.camera_revoked,
+    }
 
 
 # ── Users / Students ────────────────────────────────────────
@@ -161,8 +386,17 @@ def save_assessment_session(session: dict):
         row = AssessmentSession(
             id=session["id"],
             student_id=session["student_id"],
+            study_session_id=session.get("study_session_id"),
+            participant_id=session.get("participant_id"),
+            condition=session.get("condition"),
+            course_id=session.get("course_id"),
+            video_id=session.get("video_id"),
             questions=session.get("questions", []),
             difficulty=session.get("difficulty", "medium"),
+            starting_difficulty=session.get("starting_difficulty", session.get("difficulty", "medium")),
+            selected_difficulty=session.get("selected_difficulty", session.get("difficulty", "medium")),
+            completion_status=session.get("completion_status", "started"),
+            number_of_questions=len(session.get("questions", [])),
             time_limit=session.get("time_limit", 420),
             attention_score_during_video=session.get("attention_score_during_video", 50),
             transcript_text=session.get("transcript_text"),
@@ -181,9 +415,46 @@ def get_assessment_session(session_id: str) -> Optional[dict]:
             return None
         return {
             "id": s.id, "student_id": s.student_id, "questions": s.questions or [],
+            "study_session_id": s.study_session_id,
+            "participant_id": s.participant_id,
+            "condition": s.condition,
+            "course_id": s.course_id,
+            "video_id": s.video_id,
             "difficulty": s.difficulty, "time_limit": s.time_limit,
+            "starting_difficulty": s.starting_difficulty or s.difficulty,
+            "selected_difficulty": s.selected_difficulty or s.difficulty,
+            "completion_status": s.completion_status,
             "attention_score_during_video": s.attention_score_during_video,
             "transcript_text": s.transcript_text,
+        }
+    finally:
+        db.close()
+
+
+def get_canonical_assessment_session_for_study(study_session_id: str) -> Optional[dict]:
+    db = _session()
+    try:
+        row = db.execute(
+            select(AssessmentSession)
+            .where(AssessmentSession.study_session_id == study_session_id)
+            .order_by(AssessmentSession.created_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if not row:
+            return None
+        return {
+            "id": row.id, "student_id": row.student_id, "questions": row.questions or [],
+            "study_session_id": row.study_session_id,
+            "participant_id": row.participant_id,
+            "condition": row.condition,
+            "course_id": row.course_id,
+            "video_id": row.video_id,
+            "difficulty": row.difficulty, "time_limit": row.time_limit,
+            "starting_difficulty": row.starting_difficulty or row.difficulty,
+            "selected_difficulty": row.selected_difficulty or row.difficulty,
+            "completion_status": row.completion_status,
+            "attention_score_during_video": row.attention_score_during_video,
+            "transcript_text": row.transcript_text,
         }
     finally:
         db.close()
@@ -204,6 +475,16 @@ def save_assessment_result(result: dict):
             payload={k: v for k, v in result.items() if k not in known},
         )
         db.add(row)
+        session = db.get(AssessmentSession, result.get("session_id"))
+        if session:
+            session.completion_status = result.get("completion_status", "completed")
+            session.completed_at = datetime.utcfromtimestamp(result["timestamp"]) if result.get("timestamp") else datetime.utcnow()
+            session.ending_difficulty = result.get("next_difficulty")
+            session.total_score = result.get("earned_points")
+            session.percentage = result.get("percentage")
+            session.total_duration_seconds = result.get("time_spent")
+            session.number_of_questions = result.get("total_questions")
+            session.number_correct = result.get("correct_answers")
         db.commit()
     finally:
         db.close()
@@ -262,6 +543,9 @@ def save_crs_record(record: dict) -> dict:
             "behavioral_cue", "integrity", "trend", "complexity", "crs",
             "difficulty", "explanation",
         ]})
+        row.study_session_id = record.get("study_session_id")
+        row.participant_id = record.get("participant_id")
+        row.condition = record.get("condition")
         db.add(row)
         db.commit()
         logger.info(
@@ -296,6 +580,294 @@ def get_crs_history(student_id: str, limit: Optional[int] = None) -> list[dict]:
 def get_current_crs(student_id: str) -> Optional[dict]:
     history = get_crs_history(student_id)
     return history[-1] if history else None
+
+
+def _parse_dt(value) -> Optional[datetime]:
+    if value is None or isinstance(value, datetime):
+        return value
+    if isinstance(value, (int, float)):
+        return datetime.utcfromtimestamp(value)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            return None
+    return None
+
+
+def save_generated_questions(session: dict) -> None:
+    db = _session()
+    try:
+        for q in session.get("questions", []):
+            meta = q.get("llm_metadata") or {}
+            row = GeneratedQuestion(
+                question_id=q["id"],
+                study_session_id=session.get("study_session_id"),
+                assessment_session_id=session.get("id"),
+                model_version=meta.get("model"),
+                generated_live_fallback=meta.get("generated_from"),
+                source_material=session.get("video_id") or session.get("course_id"),
+                difficulty=q.get("difficulty"),
+                bloom_level=meta.get("blooms_level"),
+                generation_timestamp=datetime.utcnow(),
+                question_metadata=meta,
+            )
+            db.merge(row)
+        db.commit()
+    finally:
+        db.close()
+
+
+def save_question_responses(
+    *,
+    study_session: dict,
+    assessment_session: dict,
+    answers: dict,
+    response_events: Optional[list[dict]],
+    submitted_at: datetime,
+    total_time_spent: float,
+) -> list[dict]:
+    questions = assessment_session.get("questions", [])
+    events = {e.get("question_id"): e for e in (response_events or []) if e.get("question_id")}
+    fallback_per_question = total_time_spent / max(len(questions), 1)
+    rows_out = []
+    db = _session()
+    try:
+        for idx, q in enumerate(questions):
+            question_id = q["id"]
+            existing = db.execute(
+                select(QuestionResponse).where(
+                    QuestionResponse.study_session_id == study_session["study_session_id"],
+                    QuestionResponse.assessment_session_id == assessment_session["id"],
+                    QuestionResponse.question_id == question_id,
+                )
+            ).scalar_one_or_none()
+            event = events.get(question_id, {})
+            submitted_answer = answers.get(question_id)
+            status = event.get("status")
+            if status is None:
+                status = "submitted" if submitted_answer is not None else "unanswered"
+            presented = _parse_dt(event.get("presented_at"))
+            submitted = _parse_dt(event.get("submitted_at")) or (submitted_at if submitted_answer is not None else None)
+            response_time = event.get("response_time_seconds")
+            if response_time is None:
+                response_time = fallback_per_question if submitted_answer is not None else None
+            try:
+                response_time = None if response_time is None else max(0.0, float(response_time))
+            except (TypeError, ValueError):
+                response_time = None
+            correct = None
+            points = 0.0
+            if submitted_answer is not None:
+                correct = submitted_answer == q.get("correct_answer")
+                points = float(q.get("points", 10) if correct else 0)
+            meta = q.get("llm_metadata") or {}
+            if existing is None:
+                existing = QuestionResponse(
+                    study_session_id=study_session["study_session_id"],
+                    assessment_session_id=assessment_session["id"],
+                    participant_id=study_session["participant_id"],
+                    condition=study_session["condition"],
+                    question_id=question_id,
+                    question_index=idx,
+                )
+                db.add(existing)
+            existing.question_difficulty = q.get("difficulty")
+            existing.question_source = meta.get("generated_from")
+            existing.model_provider = meta.get("model")
+            existing.live_fallback_status = meta.get("generated_from")
+            existing.bloom_level = meta.get("blooms_level")
+            existing.presented_at = presented
+            existing.submitted_at = submitted
+            existing.response_time_seconds = response_time
+            existing.submitted_answer = None if submitted_answer is None else str(submitted_answer)
+            existing.correctness = correct
+            existing.score_points = points
+            existing.status = status
+            rows_out.append({
+                "question_id": question_id,
+                "question_index": idx,
+                "response_time_seconds": response_time,
+                "correctness": correct,
+                "status": status,
+            })
+        db.commit()
+    finally:
+        db.close()
+    return rows_out
+
+
+def save_research_crs_decision(
+    *,
+    study_session: dict,
+    assessment_session: dict,
+    adaptive_result: dict,
+    previous_scores: list[float],
+    per_question_responses: list[dict],
+    previous_difficulty: str,
+    attention_score: float,
+    transcript_text: Optional[str],
+) -> Optional[dict]:
+    crs_block = adaptive_result.get("crs")
+    if not crs_block or study_session["condition"] != "MCRF":
+        return None
+    db = _session()
+    try:
+        existing = db.execute(
+            select(ResearchCRSDecision).where(
+                ResearchCRSDecision.study_session_id == study_session["study_session_id"],
+                ResearchCRSDecision.assessment_session_id == assessment_session["id"],
+            )
+        ).scalar_one_or_none()
+        if existing:
+            return {
+                "id": existing.id,
+                "decision_index": existing.decision_index,
+                "crs": existing.crs,
+            }
+        prior_count = db.execute(
+            select(func.count(ResearchCRSDecision.id)).where(
+                ResearchCRSDecision.study_session_id == study_session["study_session_id"]
+            )
+        ).scalar_one()
+        decision_index = int(prior_count or 0) + 1
+        weights = crs_block.get("weights_used", {})
+        components = crs_block.get("components", {})
+        timing_values = [
+            r.get("response_time_seconds")
+            for r in per_question_responses
+            if r.get("response_time_seconds") is not None
+        ]
+        row = ResearchCRSDecision(
+            study_session_id=study_session["study_session_id"],
+            assessment_session_id=assessment_session["id"],
+            participant_id=study_session["participant_id"],
+            condition=study_session["condition"],
+            decision_index=decision_index,
+            timestamp=datetime.utcnow(),
+            performance=components["performance"],
+            behavioral_cue=components["behavioral_cue"],
+            response_timing=components["integrity"],
+            trend=components["trend"],
+            complexity=components["complexity"],
+            crs=crs_block["score"],
+            alpha=weights["alpha"],
+            beta=weights["beta"],
+            gamma=weights["gamma"],
+            delta=weights["delta"],
+            epsilon=weights["epsilon"],
+            selected_difficulty=adaptive_result["next_assessment_difficulty"],
+            previous_difficulty=previous_difficulty,
+            explanation=crs_block.get("explanation"),
+            performance_inputs={"recent_scores_pct": previous_scores},
+            timing_inputs={"response_times_seconds": timing_values},
+            trend_inputs={"recent_scores_pct": previous_scores},
+            complexity_inputs={
+                "source_material": assessment_session.get("video_id") or assessment_session.get("course_id"),
+                "transcript_present": bool(transcript_text and transcript_text.strip()),
+                "transcript_length": len(transcript_text or ""),
+            },
+            detail=crs_block.get("detail") or {},
+        )
+        db.add(row)
+        db.commit()
+        return {"id": row.id, "decision_index": decision_index, "crs": row.crs}
+    finally:
+        db.close()
+
+
+def refresh_behavioral_summary(study_session_id: str) -> Optional[dict]:
+    db = _session()
+    try:
+        study = db.get(StudySession, study_session_id)
+        if not study:
+            return None
+        logs = db.execute(
+            select(AttentionLog).where(AttentionLog.study_session_id == study_session_id)
+        ).scalars().all()
+        scores = [float(l.score) / 100.0 for l in logs if l.score is not None]
+        state_counts: dict[str, int] = {}
+        for log in logs:
+            state_counts[log.state or "unknown"] = state_counts.get(log.state or "unknown", 0) + 1
+        total = max(len(logs), 1)
+        proportions = {k: v / total for k, v in state_counts.items()}
+        existing = db.execute(
+            select(BehavioralSummary).where(BehavioralSummary.study_session_id == study_session_id)
+        ).scalar_one_or_none()
+        if existing is None:
+            existing = BehavioralSummary(
+                study_session_id=study_session_id,
+                participant_id=study.participant_id,
+                condition=study.condition,
+            )
+            db.add(existing)
+        existing.mean_b = statistics.mean(scores) if scores else 0.5
+        existing.median_b = statistics.median(scores) if scores else 0.5
+        existing.stddev_b = statistics.pstdev(scores) if len(scores) > 1 else 0.0
+        existing.min_b = min(scores) if scores else 0.5
+        existing.max_b = max(scores) if scores else 0.5
+        existing.observation_count = len(scores)
+        existing.behavioral_state_proportions = proportions
+        existing.camera_used = study.camera_used
+        existing.camera_opted_out = study.camera_opted_out
+        existing.camera_revoked = study.camera_revoked
+        existing.updated_at = datetime.utcnow()
+        db.commit()
+        return {"study_session_id": study_session_id, "observation_count": existing.observation_count}
+    finally:
+        db.close()
+
+
+def save_prepost_results(study_session_id: str, test_type: str, responses: list[dict]) -> dict:
+    test_type = test_type.lower()
+    if test_type not in {"pre", "post"}:
+        raise ValueError("test_type must be 'pre' or 'post'")
+    db = _session()
+    try:
+        study = db.get(StudySession, study_session_id)
+        if not study:
+            raise ValueError("Study session not found")
+        scores = []
+        for idx, r in enumerate(responses):
+            row = db.execute(
+                select(PrePostResult).where(
+                    PrePostResult.study_session_id == study_session_id,
+                    PrePostResult.test_type == test_type,
+                    PrePostResult.question_id == r["question_id"],
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                row = PrePostResult(
+                    study_session_id=study_session_id,
+                    participant_id=study.participant_id,
+                    test_type=test_type,
+                    question_id=r["question_id"],
+                )
+                db.add(row)
+            row.question_index = int(r.get("question_index", idx))
+            row.correctness = r.get("correctness")
+            row.response_time_seconds = r.get("response_time_seconds")
+            row.score = r.get("score")
+            row.started_at = _parse_dt(r.get("started_at"))
+            row.completed_at = _parse_dt(r.get("completed_at"))
+            if r.get("score") is not None:
+                scores.append(float(r["score"]))
+        total_score = sum(scores) if scores else None
+        if test_type == "pre":
+            study.pretest_score = total_score
+        else:
+            study.posttest_score = total_score
+        if study.pretest_score is not None and study.posttest_score is not None:
+            study.learning_gain = study.posttest_score - study.pretest_score
+        db.commit()
+        return {
+            "study_session_id": study_session_id,
+            "test_type": test_type,
+            "score": total_score,
+            "learning_gain": study.learning_gain,
+        }
+    finally:
+        db.close()
 
 
 def _component_history(student_id: str, component: str, limit: Optional[int]) -> list[dict]:
@@ -361,6 +933,7 @@ def set_consent(record: dict) -> dict:
         row = Consent(
             student_id=record["student_id"],
             session_id=record["session_id"],
+            study_session_id=record.get("study_session_id"),
             granted=record["granted"],
             granted_at=granted_at or datetime.utcnow(),
             retention_days=record.get("retention_days", 30),
@@ -368,6 +941,16 @@ def set_consent(record: dict) -> dict:
             version=record.get("version", "1.0"),
         )
         db.merge(row)
+        if record.get("study_session_id"):
+            study = db.get(StudySession, record["study_session_id"])
+            if study:
+                if record["granted"]:
+                    study.camera_used = True
+                else:
+                    if study.camera_used:
+                        study.camera_revoked = True
+                    else:
+                        study.camera_opted_out = True
         db.commit()
     finally:
         db.close()
@@ -402,8 +985,13 @@ def purge_expired_attention_logs() -> int:
 def log_attention(log: dict):
     db = _session()
     try:
+        participant_id = log.get("participant_id")
+        if not participant_id and log.get("study_session_id"):
+            study = db.get(StudySession, log["study_session_id"])
+            participant_id = study.participant_id if study else None
         row = AttentionLog(
-            student_id=log["student_id"], session_id=log.get("session_id"),
+            student_id=log["student_id"], participant_id=participant_id,
+            study_session_id=log.get("study_session_id"), session_id=log.get("session_id"),
             video_id=log.get("video_id"),
             timestamp=log.get("timestamp"), score=log.get("score"),
             state=log.get("state"), confidence=log.get("confidence"),
@@ -412,6 +1000,10 @@ def log_attention(log: dict):
             consent_confirmed=log.get("consent_confirmed", False),
         )
         db.add(row)
+        if log.get("study_session_id"):
+            study = db.get(StudySession, log["study_session_id"])
+            if study:
+                study.camera_used = True
         db.commit()
     finally:
         db.close()
@@ -427,6 +1019,8 @@ def get_attention_logs(video_id: str, student_id: str) -> list[dict]:
         ).scalars().all()
         return [{
             "student_id": r.student_id, "video_id": r.video_id, "timestamp": r.timestamp,
+            "participant_id": r.participant_id,
+            "study_session_id": r.study_session_id,
             "session_id": r.session_id,
             "score": r.score, "state": r.state, "confidence": r.confidence,
             "message": r.message, "model_response": r.model_response,

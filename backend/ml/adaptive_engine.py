@@ -138,6 +138,7 @@ class AdaptiveEngine:
                 "components": crs_result.components.as_dict(),
                 "weights_used": crs_result.weights_used,
                 "explanation": crs_result.explanation,
+                "detail": crs_result.detail,
             },
             "_debug": {
                 "engine": "crs",

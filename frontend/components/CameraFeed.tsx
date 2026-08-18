@@ -43,6 +43,7 @@ interface CameraFeedProps {
   videoId: string
   studentId: string
   sessionId: string
+  studySessionId?: string | null
   onConsentChange?: (granted: boolean) => void
   onAttentionUpdate?: (snapshot: AttentionSnapshotResponse) => void
 }
@@ -97,6 +98,7 @@ export default function CameraFeed({
   videoId,
   studentId,
   sessionId,
+  studySessionId,
   onConsentChange,
   onAttentionUpdate,
 }: CameraFeedProps) {
@@ -118,6 +120,8 @@ export default function CameraFeed({
   studentIdRef.current = studentId
   const sessionIdRef = useRef(sessionId)
   sessionIdRef.current = sessionId
+  const studySessionIdRef = useRef(studySessionId)
+  studySessionIdRef.current = studySessionId
 
   // ── UI State ──
   const [isActive, setIsActive] = useState(false)
@@ -126,6 +130,7 @@ export default function CameraFeed({
   const [isConnected, setIsConnected] = useState(false)
   const [framesSent, setFramesSent] = useState(0)
   const [lastScore, setLastScore] = useState<number | null>(null)
+  const [showConsentPrompt, setShowConsentPrompt] = useState(false)
 
   // FIX (CR6, peer review packet): consent must be resolved before the
   // camera is ever requested. `consentGranted === null` means "not yet
@@ -165,12 +170,21 @@ export default function CameraFeed({
   // STEP 1: Start webcam — getUserMedia → video.srcObject
   // ══════════════════════════════════════════════════════════
   const startCamera = useCallback(async () => {
-    if (consentGrantedRef.current !== true) return
+    if (consentGrantedRef.current !== true) {
+      setShowConsentPrompt(true)
+      return
+    }
     setIsLoading(true)
     setError(null)
     cameraReadyRef.current = false
 
     try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setError(
+          "Camera access is unavailable in this browser context. Use Chrome/Edge on localhost or HTTPS, and do not open the app from a file URL."
+        )
+        return
+      }
       console.log("[CameraFeed] Requesting webcam access...")
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
@@ -295,6 +309,7 @@ export default function CameraFeed({
               video_id: videoIdRef.current,
               student_id: studentIdRef.current,
               session_id: sessionIdRef.current,
+              study_session_id: studySessionIdRef.current || undefined,
               consent_confirmed: true,
             }),
           })
@@ -312,6 +327,7 @@ export default function CameraFeed({
           } else if (res.status === 403) {
             setConsentGranted(false)
             consentGrantedRef.current = false
+            setShowConsentPrompt(false)
             onConsentChange?.(false)
             stopCamera()
             delivered = true
@@ -366,6 +382,7 @@ export default function CameraFeed({
         body: JSON.stringify({
           student_id: studentIdRef.current,
           session_id: sessionIdRef.current,
+          study_session_id: studySessionIdRef.current || undefined,
           granted: false,
           retention_days: 30,
           raw_frames_stored: false,
@@ -387,12 +404,22 @@ export default function CameraFeed({
   const handleConsentDecision = useCallback(
     (granted: boolean) => {
       setConsentGranted(granted)
+      consentGrantedRef.current = granted
+      setShowConsentPrompt(false)
       onConsentChange?.(granted)
-      if (granted && isVideoPlaying && !isActive && !error) startCamera()
+      if (granted && !isActive && !error) startCamera()
       if (!granted) stopCamera()
     },
-    [isVideoPlaying, isActive, error, onConsentChange, startCamera, stopCamera]
+    [isActive, error, onConsentChange, startCamera, stopCamera]
   )
+
+  const handleEnableCameraClick = useCallback(() => {
+    if (consentGrantedRef.current !== true) {
+      setShowConsentPrompt(true)
+      return
+    }
+    startCamera()
+  }, [startCamera])
 
   // Cleanup on unmount
   useEffect(() => () => stopCamera(), [stopCamera])
@@ -426,8 +453,13 @@ export default function CameraFeed({
 
       {/* Consent gate (CR6) — shown once per undecided student, before any
           getUserMedia call ever happens */}
-      {isVideoPlaying && consentChecked && consentGranted === null && (
-        <ConsentModal studentId={studentId} sessionId={sessionId} onDecision={handleConsentDecision} />
+      {consentChecked && consentGranted !== true && (showConsentPrompt || (isVideoPlaying && consentGranted === null)) && (
+        <ConsentModal
+          studentId={studentId}
+          sessionId={sessionId}
+          studySessionId={studySessionId}
+          onDecision={handleConsentDecision}
+        />
       )}
 
       {/* Camera view */}
@@ -499,9 +531,9 @@ export default function CameraFeed({
       {/* Controls */}
       <div className="p-3 flex gap-2">
         {!isActive ? (
-          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={startCamera} disabled={isLoading}
+          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={handleEnableCameraClick} disabled={isLoading}
             className="flex-1 px-4 py-2 text-xs font-semibold rounded-xl bg-gradient-to-r from-violet-500 to-purple-600 text-white hover:shadow-lg hover:shadow-violet-500/20 transition-all disabled:opacity-50">
-            {isLoading ? "Starting..." : "Enable Camera"}
+            {isLoading ? "Starting..." : consentGranted === true ? "Enable Camera" : "Review Camera Consent"}
           </motion.button>
         ) : (
           <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={revokeConsent}

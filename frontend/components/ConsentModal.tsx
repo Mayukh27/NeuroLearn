@@ -17,7 +17,8 @@
  * signal, never forces a lower readiness score or an easier/harder tier.
  */
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
+import { createPortal } from "react-dom"
 import { motion, AnimatePresence } from "framer-motion"
 import { Camera, ShieldCheck, X } from "lucide-react"
 import { getToken } from "@/lib/auth"
@@ -28,11 +29,17 @@ const RETENTION_DAYS = 30
 interface ConsentModalProps {
   studentId: string
   sessionId: string
+  studySessionId?: string | null
   onDecision: (granted: boolean) => void
 }
 
-export default function ConsentModal({ studentId, sessionId, onDecision }: ConsentModalProps) {
+export default function ConsentModal({ studentId, sessionId, studySessionId, onDecision }: ConsentModalProps) {
   const [submitting, setSubmitting] = useState(false)
+  const [mounted, setMounted] = useState(false)
+
+  useEffect(() => {
+    setMounted(true)
+  }, [])
 
   const submit = async (granted: boolean) => {
     setSubmitting(true)
@@ -46,6 +53,7 @@ export default function ConsentModal({ studentId, sessionId, onDecision }: Conse
         body: JSON.stringify({
           student_id: studentId,
           session_id: sessionId,
+          study_session_id: studySessionId || undefined,
           granted,
           retention_days: RETENTION_DAYS,
           raw_frames_stored: false,
@@ -62,7 +70,9 @@ export default function ConsentModal({ studentId, sessionId, onDecision }: Conse
     }
   }
 
-  return (
+  if (!mounted) return null
+
+  return createPortal(
     <AnimatePresence>
       <motion.div
         initial={{ opacity: 0 }}
@@ -131,5 +141,7 @@ export default function ConsentModal({ studentId, sessionId, onDecision }: Conse
         </motion.div>
       </motion.div>
     </AnimatePresence>
+    ,
+    document.body
   )
 }

@@ -105,6 +105,38 @@ export interface SaveAutoCourseResponse {
   message: string
 }
 
+export interface StudySession {
+  studySessionId: string
+  participantId: string
+  condition: "MCRF" | "LEGACY"
+  sequenceOrder: "MCRF_THEN_LEGACY" | "LEGACY_THEN_MCRF"
+  courseId?: string | null
+  moduleId?: string | null
+  videoId?: string | null
+  completionStatus: string
+  experimentVersion: string
+  applicationVersion?: string | null
+}
+
+export interface QuestionResponseEvent {
+  questionId: string
+  questionIndex: number
+  presentedAt: string
+  submittedAt?: string
+  responseTimeSeconds?: number
+  status: "submitted" | "unanswered" | "timeout" | "refresh" | "retry"
+}
+
+export interface PrePostResponse {
+  questionId: string
+  questionIndex: number
+  correctness: boolean | null
+  responseTimeSeconds: number | null
+  score: number | null
+  startedAt: string
+  completedAt: string
+}
+
 // ── Helpers ──
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -351,6 +383,7 @@ export async function sendAttentionFrame(
   frameBase64: string,
   videoId: string,
   sessionId: string,
+  studySessionId?: string | null,
   studentId: string = getCachedUserId() ?? "student_001"
 ): Promise<AttentionSnapshot> {
   return apiFetch<AttentionSnapshot>(
@@ -365,6 +398,7 @@ export async function sendAttentionFrame(
         frame_base64: frameBase64,
         video_id: videoId,
         session_id: sessionId,
+        study_session_id: studySessionId || undefined,
         student_id: studentId,
         consent_confirmed: true,
       }),
@@ -446,8 +480,55 @@ export async function transcribeAudioChunk(
 // ASSESSMENT — Adaptive quiz generation + submission
 // ============================================================
 
+export async function startStudySession(
+  courseId?: string,
+  videoId?: string,
+  moduleId?: string
+): Promise<StudySession> {
+  return apiFetch<StudySession>("/research/study-sessions", {
+    method: "POST",
+    body: JSON.stringify({
+      course_id: courseId,
+      video_id: videoId,
+      module_id: moduleId || courseId,
+    }),
+  })
+}
+
+export async function savePrePostResults(
+  studySessionId: string,
+  testType: "pre" | "post",
+  responses: PrePostResponse[]
+): Promise<{ studySessionId: string; testType: string; score: number | null; learningGain: number | null }> {
+  return apiFetch(`/research/study-sessions/${studySessionId}/prepost`, {
+    method: "POST",
+    body: JSON.stringify({
+      test_type: testType,
+      responses: responses.map((response) => ({
+        question_id: response.questionId,
+        question_index: response.questionIndex,
+        correctness: response.correctness,
+        response_time_seconds: response.responseTimeSeconds,
+        score: response.score,
+        started_at: response.startedAt,
+        completed_at: response.completedAt,
+      })),
+    }),
+  })
+}
+
+export async function completeStudySession(studySessionId: string): Promise<StudySession> {
+  return apiFetch<StudySession>(`/research/study-sessions/${studySessionId}/complete`, {
+    method: "POST",
+    body: JSON.stringify({ completion_status: "completed" }),
+  })
+}
+
 export interface AssessmentSession {
   id: string
+  studySessionId?: string
+  participantId?: string
+  condition?: "MCRF" | "LEGACY"
   courseId: string
   videoId: string
   questions: AssessmentQuestion[]
@@ -535,7 +616,8 @@ export async function generateAssessment(
   videoId: string,
   attentionScore: number,
   previousScore: number | null,
-  transcriptText: string = ""
+  transcriptText: string = "",
+  studySessionId?: string | null
 ): Promise<AssessmentSession> {
   return apiFetch<AssessmentSession>(
     "/assessment/generate",
@@ -545,6 +627,7 @@ export async function generateAssessment(
         course_id: courseId,
         video_id: videoId,
         student_id: getCachedUserId() ?? "student_001",
+        study_session_id: studySessionId || undefined,
         attention_score: attentionScore,
         previous_score: previousScore,
         transcript_text: transcriptText,
@@ -570,6 +653,7 @@ export async function generateAssessment(
 
       return {
         id: `session_${Date.now()}`,
+        studySessionId: studySessionId || undefined,
         courseId,
         videoId,
         questions,
@@ -590,7 +674,8 @@ export async function submitAssessment(
   sessionId: string,
   answers: Record<string, string | number>,
   questions: AssessmentQuestion[],
-  timeSpent: number
+  timeSpent: number,
+  responseEvents: QuestionResponseEvent[] = []
 ): Promise<AssessmentResult> {
   return apiFetch<AssessmentResult>(
     "/assessment/submit",
@@ -601,6 +686,14 @@ export async function submitAssessment(
         student_id: getCachedUserId() ?? "student_001",
         answers,
         time_spent: timeSpent,
+        response_events: responseEvents.map((event) => ({
+          question_id: event.questionId,
+          question_index: event.questionIndex,
+          presented_at: event.presentedAt,
+          submitted_at: event.submittedAt,
+          response_time_seconds: event.responseTimeSeconds,
+          status: event.status,
+        })),
       }),
     },
     async () => {

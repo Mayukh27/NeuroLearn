@@ -31,6 +31,7 @@ from routers import (
     report_router,
     content_router,          # ← NEW: Auto Course Generator
     crs_router,               # ← Phase 11 (NeuroLearn-MCL): CRS read endpoints
+    research_router,
 )
 from routers.auth import router as auth_router
 
@@ -146,6 +147,7 @@ app.include_router(gamification_router)
 app.include_router(report_router)
 app.include_router(content_router)     # ← NEW
 app.include_router(crs_router)         # ← Phase 11 (NeuroLearn-MCL)
+app.include_router(research_router)
 
 
 # ── Health Check ──

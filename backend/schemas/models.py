@@ -173,6 +173,7 @@ class AttentionFrameRequest(BaseModel):
     video_id: str
     student_id: str
     session_id: str
+    study_session_id: Optional[str] = None
     # FIX (CR6, peer review packet): the backend must not analyze or store
     # a frame without an on-file consent grant for this student. The
     # frontend gates camera start behind the consent modal (see
@@ -187,6 +188,7 @@ class ConsentGrant(BaseModel):
     """A student's response to the webcam-monitoring consent prompt."""
     student_id: str
     session_id: str
+    study_session_id: Optional[str] = None
     granted: bool
     # What the student was told at the time of consent — kept alongside the
     # grant so a later policy change doesn't retroactively reinterpret an
@@ -271,6 +273,9 @@ class AdaptiveMetadata(BaseModel):
 
 class AssessmentSession(BaseModel):
     id: str
+    study_session_id: Optional[str] = None
+    participant_id: Optional[str] = None
+    condition: Optional[Literal["MCRF", "LEGACY"]] = None
     course_id: str
     video_id: str
     questions: list[AssessmentQuestion]
@@ -284,6 +289,7 @@ class GenerateAssessmentRequest(BaseModel):
     course_id: str
     video_id: str
     student_id: str
+    study_session_id: Optional[str] = None
     attention_score: float = Field(ge=0, le=100)
     previous_score: Optional[float] = None
     transcript_text: Optional[str] = None
@@ -294,6 +300,7 @@ class SubmitAssessmentRequest(BaseModel):
     student_id: str
     answers: dict[str, int | str]  # question_id -> selected answer
     time_spent: int  # seconds
+    response_events: Optional[list[dict]] = None
 
 
 class AdaptiveResponse(BaseModel):
@@ -311,6 +318,9 @@ class AdaptiveResponse(BaseModel):
 
 class AssessmentResult(BaseModel):
     session_id: str
+    study_session_id: Optional[str] = None
+    participant_id: Optional[str] = None
+    condition: Optional[Literal["MCRF", "LEGACY"]] = None
     score: float
     total_points: int
     earned_points: int

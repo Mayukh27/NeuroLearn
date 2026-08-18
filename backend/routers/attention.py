@@ -38,6 +38,7 @@ from data.database import (
     get_consent,
     set_consent,
     purge_expired_attention_logs,
+    get_study_session,
 )
 from data.models_orm import User
 from auth.security import get_current_user
@@ -67,9 +68,15 @@ async def grant_or_revoke_consent(
     ignored for authorization — consent is always recorded against the
     JWT-identified student, never an arbitrary id the client supplies.
     """
+    if grant.study_session_id:
+        study = get_study_session(grant.study_session_id)
+        if not study or study["user_id"] != current_user.id:
+            raise HTTPException(status_code=403, detail="Invalid study session for consent")
+
     record = {
         "student_id": current_user.id,
         "session_id": grant.session_id,
+        "study_session_id": grant.study_session_id,
         "granted": grant.granted,
         "granted_at": datetime.now(timezone.utc).isoformat(),
         "retention_days": grant.retention_days,
@@ -131,11 +138,17 @@ async def analyze_frame(
     result = attention_detector.analyze_frame(request.frame_base64)
     result["consent_confirmed"] = True
 
+    if request.study_session_id:
+        study = get_study_session(request.study_session_id)
+        if not study or study["user_id"] != current_user.id:
+            raise HTTPException(status_code=403, detail="Invalid study session for webcam snapshot")
+
     # Log only the derived score, under the retention window the student
     # consented to (see purge_expired_attention_logs / CR6).
     log_attention({
         "video_id": request.video_id,
         "session_id": request.session_id,
+        "study_session_id": request.study_session_id,
         "student_id": current_user.id,
         **result,
     })

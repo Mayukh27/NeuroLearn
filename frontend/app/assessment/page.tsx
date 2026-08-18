@@ -5,7 +5,13 @@ import { useRouter, useSearchParams } from "next/navigation"
 import { motion, AnimatePresence } from "framer-motion"
 import { Brain, Clock, Loader2 } from "lucide-react"
 import AssessmentCard from "@/components/AssessmentCard"
-import { generateAssessment, submitAssessment, type AssessmentSession, type AssessmentQuestion } from "@/lib/api"
+import {
+  generateAssessment,
+  submitAssessment,
+  type AssessmentSession,
+  type AssessmentQuestion,
+  type QuestionResponseEvent,
+} from "@/lib/api"
 
 export default function AssessmentPage() {
   return (
@@ -24,6 +30,7 @@ function AssessmentContent() {
   const searchParams = useSearchParams()
   const courseId = searchParams.get("course") || "course_001"
   const videoId = searchParams.get("video") || "v1"
+  const studySessionId = searchParams.get("studySession")
   const attentionScore = parseFloat(searchParams.get("behavioral_cue") || "70")
   const prevScore = searchParams.get("prev") ? parseFloat(searchParams.get("prev")!) : null
   const attentionDataParam = searchParams.get("attentionData") || ""
@@ -38,6 +45,8 @@ function AssessmentContent() {
   const [timeRemaining, setTimeRemaining] = useState(0)
   const [startTime] = useState(Date.now())
   const timerRef = useRef<NodeJS.Timeout | undefined>(undefined)
+  const questionPresentedAtRef = useRef<Record<string, number>>({})
+  const responseEventsRef = useRef<QuestionResponseEvent[]>([])
 
   // Fetch transcript text from window (set by TranscriptionPanel)
   const getTranscriptText = (): string => {
@@ -57,7 +66,8 @@ function AssessmentContent() {
           videoId,
           attentionScore,
           prevScore,
-          getTranscriptText()
+          getTranscriptText(),
+          studySessionId
         )
         setSession(sess)
         setTimeRemaining(sess.timeLimit)
@@ -69,6 +79,13 @@ function AssessmentContent() {
     }
     generate()
   }, [courseId, videoId, attentionScore, prevScore])
+
+  useEffect(() => {
+    const question = session?.questions[currentIdx]
+    if (question && !questionPresentedAtRef.current[question.id]) {
+      questionPresentedAtRef.current[question.id] = Date.now()
+    }
+  }, [session, currentIdx])
 
   // Timer countdown
   useEffect(() => {
@@ -92,6 +109,19 @@ function AssessmentContent() {
   }, [session, answers])
 
   const handleAnswer = async (questionId: string, answer: string | number) => {
+    const presentedAt = questionPresentedAtRef.current[questionId] || Date.now()
+    const submittedAt = Date.now()
+    responseEventsRef.current = [
+      ...responseEventsRef.current.filter((event) => event.questionId !== questionId),
+      {
+        questionId,
+        questionIndex: currentIdx,
+        presentedAt: new Date(presentedAt).toISOString(),
+        submittedAt: new Date(submittedAt).toISOString(),
+        responseTimeSeconds: Math.max(0, Math.round((submittedAt - presentedAt) / 100) / 10),
+        status: "submitted",
+      },
+    ]
     const newAnswers = { ...answers, [questionId]: answer }
     setAnswers(newAnswers)
 
@@ -110,9 +140,41 @@ function AssessmentContent() {
 
     const elapsed = Math.floor((Date.now() - startTime) / 1000)
     const ans = finalAnswers || answers
+    const submittedIds = new Set(responseEventsRef.current.map((event) => event.questionId))
+    const completionStatus = timeRemaining <= 0 ? "timeout" : "unanswered"
+    const unansweredEvents: QuestionResponseEvent[] = []
+    ;(session.questions || []).forEach((question, index) => {
+        const presentedAt = questionPresentedAtRef.current[question.id]
+        if (submittedIds.has(question.id) || !presentedAt) return
+        unansweredEvents.push({
+          questionId: question.id,
+          questionIndex: index,
+          presentedAt: new Date(presentedAt).toISOString(),
+          responseTimeSeconds: Math.max(0, Math.round((Date.now() - presentedAt) / 100) / 10),
+          status: completionStatus,
+        })
+      })
+    const responseEvents = [...responseEventsRef.current, ...unansweredEvents]
 
     try {
-      const result = await submitAssessment(session.id, ans, session.questions, elapsed)
+      const result = await submitAssessment(session.id, ans, session.questions, elapsed, responseEvents)
+      const resultPayload = {
+        data: JSON.stringify(result),
+        behavioral_cue: attentionDataParam,
+        course: courseTitleParam,
+        video: videoTitleParam,
+      }
+      if (session.studySessionId || studySessionId) {
+        window.sessionStorage.setItem("neurolearn_last_result", JSON.stringify(resultPayload))
+        const params = new URLSearchParams({
+          type: "post",
+          studySession: session.studySessionId || studySessionId || "",
+          course: courseId,
+          video: videoId,
+        })
+        router.push(`/study-test?${params.toString()}`)
+        return
+      }
       // Navigate to results with all data serialized (including behavioral_cue for report card)
       const params = new URLSearchParams({
         data: JSON.stringify(result),

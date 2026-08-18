@@ -14,7 +14,8 @@ import uuid
 from datetime import datetime, date
 
 from sqlalchemy import (
-    Column, String, Integer, Float, Boolean, DateTime, Date, ForeignKey, Text
+    Column, String, Integer, Float, Boolean, DateTime, Date, ForeignKey, Text,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
@@ -97,8 +98,23 @@ class AssessmentSession(Base):
     __tablename__ = "assessment_sessions"
     id = Column(String, primary_key=True, default=_uuid)
     student_id = Column(String, ForeignKey("users.id"), index=True)
+    study_session_id = Column(String, ForeignKey("study_sessions.study_session_id"), nullable=True, index=True)
+    participant_id = Column(String, ForeignKey("research_participants.participant_id"), nullable=True, index=True)
+    condition = Column(String, nullable=True, index=True)
+    course_id = Column(String, nullable=True, index=True)
+    video_id = Column(String, nullable=True, index=True)
     questions = Column(JSONB, default=list)
     difficulty = Column(String, default="medium")
+    starting_difficulty = Column(String, nullable=True)
+    selected_difficulty = Column(String, nullable=True)
+    ending_difficulty = Column(String, nullable=True)
+    completion_status = Column(String, default="started", index=True)
+    completed_at = Column(DateTime, nullable=True)
+    total_score = Column(Float, nullable=True)
+    percentage = Column(Float, nullable=True)
+    total_duration_seconds = Column(Float, nullable=True)
+    number_of_questions = Column(Integer, nullable=True)
+    number_correct = Column(Integer, nullable=True)
     time_limit = Column(Integer, default=420)
     attention_score_during_video = Column(Float, default=50)
     transcript_text = Column(Text, nullable=True)
@@ -121,6 +137,9 @@ class CRSHistory(Base):
     __tablename__ = "crs_history"
     id = Column(String, primary_key=True, default=_uuid)
     student_id = Column(String, ForeignKey("users.id"), index=True)
+    study_session_id = Column(String, ForeignKey("study_sessions.study_session_id"), nullable=True, index=True)
+    participant_id = Column(String, ForeignKey("research_participants.participant_id"), nullable=True, index=True)
+    condition = Column(String, nullable=True, index=True)
     assessment_id = Column(String, nullable=True)
     timestamp = Column(Float)
     performance = Column(Float)
@@ -136,7 +155,10 @@ class CRSHistory(Base):
 class Consent(Base):
     """CR6 (peer review packet) — webcam-monitoring consent, one row per user."""
     __tablename__ = "consent"
-    student_id = Column(String, ForeignKey("users.id"), primary_key=True)`r`n    session_id = Column(String, primary_key=True, default="legacy")`r`n    granted = Column(Boolean, default=False)
+    student_id = Column(String, ForeignKey("users.id"), primary_key=True)
+    session_id = Column(String, primary_key=True, default="legacy")
+    study_session_id = Column(String, ForeignKey("study_sessions.study_session_id"), nullable=True, index=True)
+    granted = Column(Boolean, default=False)
     granted_at = Column(DateTime, nullable=True)
     retention_days = Column(Integer, default=30)
     raw_frames_stored = Column(Boolean, default=False)
@@ -149,6 +171,8 @@ class AttentionLog(Base):
     __tablename__ = "attention_logs"
     id = Column(String, primary_key=True, default=_uuid)
     student_id = Column(String, ForeignKey("users.id"), index=True)
+    participant_id = Column(String, ForeignKey("research_participants.participant_id"), nullable=True, index=True)
+    study_session_id = Column(String, ForeignKey("study_sessions.study_session_id"), nullable=True, index=True)
     session_id = Column(String, index=True, nullable=True)
     video_id = Column(String, index=True)
     timestamp = Column(String)
@@ -159,6 +183,161 @@ class AttentionLog(Base):
     model_response = Column(JSONB, default=dict)
     source = Column(String, default="dummy")  # MJ4 fix: "live" | "dummy"
     consent_confirmed = Column(Boolean, default=False)
+
+
+class ResearchParticipant(Base):
+    __tablename__ = "research_participants"
+    participant_id = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("users.id"), unique=True, nullable=False, index=True)
+    sequence_order = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class StudySession(Base):
+    __tablename__ = "study_sessions"
+    study_session_id = Column(String, primary_key=True, default=lambda: f"study_{uuid.uuid4().hex[:12]}")
+    participant_id = Column(String, ForeignKey("research_participants.participant_id"), nullable=False, index=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    condition = Column(String, nullable=False, index=True)
+    sequence_order = Column(String, nullable=False)
+    course_id = Column(String, nullable=True, index=True)
+    module_id = Column(String, nullable=True, index=True)
+    video_id = Column(String, nullable=True, index=True)
+    started_at = Column(DateTime, default=datetime.utcnow, index=True)
+    ended_at = Column(DateTime, nullable=True)
+    completion_status = Column(String, default="started", index=True)
+    experiment_version = Column(String, default="full-study-v1", index=True)
+    application_version = Column(String, nullable=True)
+    crs_config_version = Column(String, default="crs-equal-weights-v1")
+    pretest_score = Column(Float, nullable=True)
+    posttest_score = Column(Float, nullable=True)
+    learning_gain = Column(Float, nullable=True)
+    camera_used = Column(Boolean, default=False)
+    camera_opted_out = Column(Boolean, default=False)
+    camera_revoked = Column(Boolean, default=False)
+
+
+class QuestionResponse(Base):
+    __tablename__ = "question_responses"
+    id = Column(String, primary_key=True, default=_uuid)
+    study_session_id = Column(String, ForeignKey("study_sessions.study_session_id"), nullable=False, index=True)
+    assessment_session_id = Column(String, ForeignKey("assessment_sessions.id"), nullable=False, index=True)
+    participant_id = Column(String, ForeignKey("research_participants.participant_id"), nullable=False, index=True)
+    condition = Column(String, nullable=False, index=True)
+    question_id = Column(String, nullable=False, index=True)
+    question_index = Column(Integer, nullable=False)
+    question_difficulty = Column(String, nullable=True)
+    question_source = Column(String, nullable=True)
+    model_provider = Column(String, nullable=True)
+    live_fallback_status = Column(String, nullable=True)
+    bloom_level = Column(String, nullable=True)
+    presented_at = Column(DateTime, nullable=True)
+    submitted_at = Column(DateTime, nullable=True)
+    response_time_seconds = Column(Float, nullable=True)
+    submitted_answer = Column(Text, nullable=True)
+    correctness = Column(Boolean, nullable=True)
+    score_points = Column(Float, nullable=True)
+    status = Column(String, default="submitted", index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "study_session_id", "assessment_session_id", "question_id",
+            name="uq_question_response_once",
+        ),
+    )
+
+
+class ResearchCRSDecision(Base):
+    __tablename__ = "research_crs_decisions"
+    id = Column(String, primary_key=True, default=_uuid)
+    study_session_id = Column(String, ForeignKey("study_sessions.study_session_id"), nullable=False, index=True)
+    assessment_session_id = Column(String, ForeignKey("assessment_sessions.id"), nullable=False, index=True)
+    participant_id = Column(String, ForeignKey("research_participants.participant_id"), nullable=False, index=True)
+    condition = Column(String, nullable=False, index=True)
+    decision_index = Column(Integer, nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    performance = Column(Float, nullable=False)
+    behavioral_cue = Column(Float, nullable=False)
+    response_timing = Column(Float, nullable=False)
+    trend = Column(Float, nullable=False)
+    complexity = Column(Float, nullable=False)
+    crs = Column(Float, nullable=False)
+    alpha = Column(Float, nullable=False)
+    beta = Column(Float, nullable=False)
+    gamma = Column(Float, nullable=False)
+    delta = Column(Float, nullable=False)
+    epsilon = Column(Float, nullable=False)
+    selected_difficulty = Column(String, nullable=False)
+    previous_difficulty = Column(String, nullable=True)
+    explanation = Column(Text, nullable=True)
+    performance_inputs = Column(JSONB, default=dict)
+    timing_inputs = Column(JSONB, default=dict)
+    trend_inputs = Column(JSONB, default=dict)
+    complexity_inputs = Column(JSONB, default=dict)
+    detail = Column(JSONB, default=dict)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "study_session_id", "assessment_session_id", "decision_index",
+            name="uq_research_crs_decision_index",
+        ),
+    )
+
+
+class BehavioralSummary(Base):
+    __tablename__ = "behavioral_summaries"
+    id = Column(String, primary_key=True, default=_uuid)
+    study_session_id = Column(String, ForeignKey("study_sessions.study_session_id"), nullable=False, unique=True, index=True)
+    participant_id = Column(String, ForeignKey("research_participants.participant_id"), nullable=False, index=True)
+    condition = Column(String, nullable=False, index=True)
+    mean_b = Column(Float, nullable=True)
+    median_b = Column(Float, nullable=True)
+    stddev_b = Column(Float, nullable=True)
+    min_b = Column(Float, nullable=True)
+    max_b = Column(Float, nullable=True)
+    observation_count = Column(Integer, default=0)
+    behavioral_state_proportions = Column(JSONB, default=dict)
+    camera_used = Column(Boolean, default=False)
+    camera_opted_out = Column(Boolean, default=False)
+    camera_revoked = Column(Boolean, default=False)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PrePostResult(Base):
+    __tablename__ = "prepost_results"
+    id = Column(String, primary_key=True, default=_uuid)
+    study_session_id = Column(String, ForeignKey("study_sessions.study_session_id"), nullable=False, index=True)
+    participant_id = Column(String, ForeignKey("research_participants.participant_id"), nullable=False, index=True)
+    test_type = Column(String, nullable=False, index=True)
+    question_id = Column(String, nullable=False)
+    question_index = Column(Integer, nullable=False)
+    correctness = Column(Boolean, nullable=True)
+    response_time_seconds = Column(Float, nullable=True)
+    score = Column(Float, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "study_session_id", "test_type", "question_id",
+            name="uq_prepost_question_once",
+        ),
+    )
+
+
+class GeneratedQuestion(Base):
+    __tablename__ = "generated_questions"
+    question_id = Column(String, primary_key=True)
+    study_session_id = Column(String, ForeignKey("study_sessions.study_session_id"), nullable=True, index=True)
+    assessment_session_id = Column(String, ForeignKey("assessment_sessions.id"), nullable=True, index=True)
+    model_version = Column(String, nullable=True)
+    generated_live_fallback = Column(String, nullable=True)
+    source_material = Column(String, nullable=True)
+    difficulty = Column(String, nullable=True)
+    bloom_level = Column(String, nullable=True)
+    generation_timestamp = Column(DateTime, default=datetime.utcnow)
+    question_metadata = Column(JSONB, default=dict)
 
 
 class DailyChallenge(Base):
