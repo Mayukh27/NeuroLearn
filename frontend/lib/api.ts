@@ -108,7 +108,7 @@ export interface SaveAutoCourseResponse {
 export interface StudySession {
   studySessionId: string
   participantId: string
-  condition: "MCRF" | "LEGACY"
+  condition: "MCRF" | "LEGACY" | "MIXED"
   sequenceOrder: "MCRF_THEN_LEGACY" | "LEGACY_THEN_MCRF"
   courseId?: string | null
   moduleId?: string | null
@@ -485,11 +485,32 @@ export async function startStudySession(
   })
 }
 
+/** Persist a video that reached its completion event in this study session. */
+export async function completeStudyVideo(
+  studySessionId: string,
+  videoId: string,
+  transcriptText: string = ""
+): Promise<{ studySessionId: string; videoId: string; completionOrder: number; completedAt: string }> {
+  return apiFetch(
+    `/research/study-sessions/${encodeURIComponent(studySessionId)}/videos/${encodeURIComponent(videoId)}/complete`,
+    {
+      method: "POST",
+      body: JSON.stringify({ transcript_text: transcriptText }),
+    },
+    async () => ({
+      studySessionId,
+      videoId,
+      completionOrder: 1,
+      completedAt: new Date().toISOString(),
+    })
+  )
+}
+
 export interface AssessmentSession {
   id: string
   studySessionId?: string
   participantId?: string
-  condition?: "MCRF" | "LEGACY"
+  condition?: "MCRF" | "LEGACY" | "MIXED"
   courseId: string
   videoId: string
   contributingVideoIds?: string[]
@@ -612,7 +633,16 @@ export async function generateAssessment(
         reason += ` | Low behavioral_cue (${attentionScore}%) → easy`
       }
 
-      const questions = QUESTION_BANK[difficulty].slice(0, 5)
+      const fallbackPool = [
+        ...QUESTION_BANK[difficulty],
+        ...Object.entries(QUESTION_BANK)
+          .filter(([level]) => level !== difficulty)
+          .flatMap(([, bank]) => bank),
+      ]
+      const questions = fallbackPool.slice(0, 10).map((question, index) => ({
+        ...question,
+        id: `${question.id}_fallback_${index}`,
+      }))
       const timeLimits = { easy: 600, medium: 420, hard: 300 }
 
       return {

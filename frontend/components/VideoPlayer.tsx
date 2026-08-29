@@ -150,6 +150,28 @@ export default function VideoPlayer({
     return () => clearInterval(interval)
   }, [videoType, isPlaying, duration, onTimeUpdate])
 
+  // YouTube does not emit native media events to the parent document.  With
+  // enablejsapi=1 it does post its terminal state, which is the completion
+  // signal used by the study flow just like HTMLVideoElement's `ended` event.
+  useEffect(() => {
+    if (videoType !== "youtube") return
+    const onYouTubeMessage = (event: MessageEvent) => {
+      try {
+        if (!/youtube\.com$|youtube-nocookie\.com$/.test(new URL(event.origin).hostname)) return
+        const payload = typeof event.data === "string" ? JSON.parse(event.data) : event.data
+        if (payload?.event === "onStateChange" && payload?.info === 0) {
+          setIsPlaying(false)
+          onPlayStateChange?.(false)
+          onVideoEnd?.()
+        }
+      } catch {
+        // Ignore unrelated cross-window messages and non-JSON payloads.
+      }
+    }
+    window.addEventListener("message", onYouTubeMessage)
+    return () => window.removeEventListener("message", onYouTubeMessage)
+  }, [videoType, onPlayStateChange, onVideoEnd])
+
   const togglePlay = useCallback(() => {
     if (videoType === "mp4") {
       const video = videoRef.current

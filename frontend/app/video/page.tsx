@@ -20,6 +20,7 @@ import VideoLinkSelector from "@/components/VideoLinkSelector"
 import {
   fetchCourseById,
   fetchCourses,
+  completeStudyVideo,
   startStudySession,
   type Course,
   type VideoLink,
@@ -65,6 +66,7 @@ function VideoContent() {
   const [studySession, setStudySession] = useState<StudySession | null>(null)
   const [behavioralCueGranted, setBehavioralCueGranted] = useState<boolean | null>(null)
   const [completedVideoTranscripts, setCompletedVideoTranscripts] = useState<Record<string, string>>({})
+  const [isPreparingAssessment, setIsPreparingAssessment] = useState(false)
 
   // Behavioral Cue state
   const [latestAttention, setLatestAttention] = useState<AttentionSnapshotResponse | null>(null)
@@ -116,7 +118,7 @@ function VideoContent() {
       setStudySession({
         studySessionId: studySessionParam,
         participantId: "",
-        condition: "MCRF",
+        condition: "MIXED",
         sequenceOrder: "MCRF_THEN_LEGACY",
         completionStatus: "started",
         experimentVersion: "full-study-v1",
@@ -151,16 +153,24 @@ function VideoContent() {
   const handleVideoEnd = useCallback(() => {
     setVideoEnded(true)
     setIsPlaying(false)
-    if (selectedVideo?.id) {
+    const completedVideoId = selectedVideo?.id || (customUrl ? "custom" : null)
+    if (completedVideoId) {
       const transcriptText = typeof window !== "undefined" && (window as any).__transcriptText
         ? (window as any).__transcriptText()
         : ""
       setCompletedVideoTranscripts((prev) => ({
         ...prev,
-        [selectedVideo.id]: transcriptText,
+        [completedVideoId]: transcriptText,
       }))
+      // This terminal playback event is the only client path that marks a
+      // video completed.  The same idempotent call is repeated just before
+      // assessment navigation, so a brief session-start race cannot drop it.
+      if (studySession?.studySessionId) {
+        void completeStudyVideo(studySession.studySessionId, completedVideoId, transcriptText)
+          .catch((err) => console.error("Failed to record completed video:", err))
+      }
     }
-  }, [selectedVideo?.id])
+  }, [customUrl, selectedVideo?.id, studySession?.studySessionId])
 
   // FIXED: Use functional updates — no stale closure on attentionHistory
   const handleAttentionUpdate = useCallback((snapshot: AttentionSnapshotResponse) => {
@@ -183,7 +193,6 @@ function VideoContent() {
     setLatestAttention(null)
     setSessionAvgAttention(0)
     setBehavioralCueGranted(null)
-    setStudySession(null)
     setWebcamSessionId(newWebcamSessionId())
     setCustomUrl("")
     setShowCustomInput(false)
@@ -199,13 +208,24 @@ function VideoContent() {
     setLatestAttention(null)
     setSessionAvgAttention(0)
     setBehavioralCueGranted(null)
-    setStudySession(null)
-    setCompletedVideoTranscripts({})
     setWebcamSessionId(newWebcamSessionId())
     setShowCustomInput(false)
   }
 
-  const goToAssessment = () => {
+  const goToAssessment = async () => {
+    if (isPreparingAssessment) return
+    setIsPreparingAssessment(true)
+    try {
+      // The backend derives the assessment context exclusively from these
+      // completion records.  Replaying all entries is safe and preserves the
+      // original completion order on the server.
+      if (studySession?.studySessionId) {
+        await Promise.all(
+          Object.entries(completedVideoTranscripts).map(([videoId, transcriptText]) =>
+            completeStudyVideo(studySession.studySessionId, videoId, transcriptText)
+          )
+        )
+      }
     // Build behavioral_cue summary to thread through to report card
     const attentionSummary = {
       avgScore: Math.round(effectiveBehavioralCue * 10) / 10,
@@ -231,6 +251,11 @@ function VideoContent() {
         .join("\n\n"),
     })
     router.push(`/assessment?${params.toString()}`)
+    } catch (err) {
+      console.error("Assessment preparation failed:", err)
+    } finally {
+      setIsPreparingAssessment(false)
+    }
   }
 
   if (isLoading) {
@@ -317,9 +342,9 @@ function VideoContent() {
                       Based on this and the video content, we&apos;ll generate a personalized quiz.
                     </p>
                     <div className="flex items-center gap-3">
-                      <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={goToAssessment}
-                        className="px-5 py-2.5 text-sm font-semibold rounded-xl bg-gradient-to-r from-violet-500 to-purple-600 text-white hover:shadow-lg hover:shadow-violet-500/20 transition-all flex items-center gap-2">
-                        <ClipboardCheck size={16} /> Take Assessment
+                      <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={goToAssessment} disabled={isPreparingAssessment}
+                        className="px-5 py-2.5 text-sm font-semibold rounded-xl bg-gradient-to-r from-violet-500 to-purple-600 text-white hover:shadow-lg hover:shadow-violet-500/20 transition-all flex items-center gap-2 disabled:opacity-60">
+                        <ClipboardCheck size={16} /> {isPreparingAssessment ? "Preparing…" : "Take Assessment"}
                       </motion.button>
                       <button onClick={() => setVideoEnded(false)}
                         className="px-4 py-2.5 text-sm font-medium rounded-xl bg-[var(--bg-elevated)] text-[var(--text-secondary)] border border-[var(--border-subtle)] hover:border-[var(--border-default)] transition-all">

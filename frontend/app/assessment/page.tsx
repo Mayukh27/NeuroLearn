@@ -12,7 +12,7 @@ import {
   type QuestionResponseEvent,
 } from "@/lib/api"
 
-const TARGET_ADAPTIVE_ROUNDS = 12
+const TOTAL_ASSESSMENT_QUESTIONS = 10
 
 export default function AssessmentPage() {
   return (
@@ -134,7 +134,7 @@ function AssessmentContent() {
     const newAnswers = { ...answers, [questionId]: answer }
     setAnswers(newAnswers)
 
-    const isFinalQuestion = currentIdx + 1 >= TARGET_ADAPTIVE_ROUNDS
+    const isFinalQuestion = currentIdx + 1 >= TOTAL_ASSESSMENT_QUESTIONS
     if (isFinalQuestion) {
       setIsSubmitting(true)
     } else {
@@ -247,10 +247,10 @@ function AssessmentContent() {
           key={currentQ.id}
           question={currentQ}
           questionNumber={currentIdx + 1}
-          totalQuestions={TARGET_ADAPTIVE_ROUNDS}
+          totalQuestions={TOTAL_ASSESSMENT_QUESTIONS}
           timeRemaining={timeRemaining}
           initialAnswer={answers[currentQ.id] ?? null}
-          isFinalQuestion={currentIdx + 1 >= TARGET_ADAPTIVE_ROUNDS}
+          isFinalQuestion={currentIdx + 1 >= TOTAL_ASSESSMENT_QUESTIONS}
           isBusy={isAdvancing || isSubmitting}
           canGoPrevious={currentIdx > 0}
           canGoNext={answers[currentQ.id] !== undefined && currentIdx < session.questions.length - 1}

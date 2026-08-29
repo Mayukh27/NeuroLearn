@@ -151,6 +151,8 @@ class AdaptiveEngine:
         student_id: str,
         attention_score: float,
         previous_score: Optional[float] = None,
+        previous_scores: Optional[list[float]] = None,
+        transcript_text: Optional[str] = None,
     ) -> dict:
         """
         Determine initial assessment difficulty before quiz starts.
@@ -160,13 +162,18 @@ class AdaptiveEngine:
             return self._get_initial_difficulty_legacy(student_id, attention_score, previous_score)
 
         scores_history = self._history.get(student_id, [])
-        recent_scores = [h["score"] for h in scores_history[-5:]]
-        if previous_score is not None:
+        # The optional explicit history is supplied by the durable research
+        # store.  This keeps initial MCRF decisions reproducible after a
+        # process restart while preserving the original call signature for
+        # existing callers.
+        recent_scores = list(previous_scores[-5:]) if previous_scores else [h["score"] for h in scores_history[-5:]]
+        if previous_score is not None and (not recent_scores or recent_scores[-1] != previous_score):
             recent_scores = recent_scores + [previous_score]
 
         crs_result: CRSResult = compute_crs(
             recent_scores_pct=recent_scores or None,
             attention_score_pct=attention_score,
+            transcript_text=transcript_text,
             # No timing/correctness yet — compute_crs defaults Integrity to
             # its neutral maximum (see crs.py docstring) so a student isn't
             # penalized before answering anything.
@@ -184,6 +191,14 @@ class AdaptiveEngine:
                 "adjusted_difficulty": crs_result.difficulty,
                 "reason": reason,
                 "crs": crs_result.crs,
+            },
+            "crs": {
+                "score": crs_result.crs,
+                "score_pct": crs_result.crs_pct,
+                "components": crs_result.components.as_dict(),
+                "weights_used": crs_result.weights_used,
+                "explanation": crs_result.explanation,
+                "detail": crs_result.detail,
             },
         }
 

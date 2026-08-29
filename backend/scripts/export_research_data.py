@@ -31,6 +31,7 @@ from data.models_orm import (
     ResearchLegacyDecision,
     ResearchParticipant,
     StudySession,
+    StudyVideoCompletion,
 )
 
 
@@ -49,6 +50,13 @@ EXPORTS = {
             "learning_gain", "camera_used", "camera_opted_out", "camera_revoked",
         ],
     ),
+    "study_video_completions": (
+        StudyVideoCompletion,
+        [
+            "id", "study_session_id", "participant_id", "video_id",
+            "completion_order", "completed_at", "transcript_text",
+        ],
+    ),
     "assessments": (
         AssessmentSession,
         [
@@ -56,7 +64,8 @@ EXPORTS = {
             "video_id", "contributing_video_ids", "difficulty", "starting_difficulty", "selected_difficulty",
             "ending_difficulty", "total_score", "percentage",
             "total_duration_seconds", "number_of_questions", "number_correct",
-            "completion_status", "created_at", "completed_at",
+            "completion_status", "created_at", "completed_at", "questions",
+            "adaptive_state", "transcript_text",
         ],
     ),
     "question_responses": (

@@ -31,13 +31,15 @@ from data.models_orm import (
     DailyChallengeProgress, PasswordResetToken, RefreshToken,
     ResearchParticipant, StudySession, QuestionResponse, ResearchCRSDecision,
     ResearchLegacyDecision,
-    BehavioralSummary, PrePostResult, GeneratedQuestion,
+    BehavioralSummary, PrePostResult, GeneratedQuestion, StudyVideoCompletion,
 )
 
 XP_PER_LEVEL = 100
-EXPERIMENT_VERSION = "full-study-v1"
+EXPERIMENT_VERSION = "full-study-v2-mixed-segments"
 CRS_CONFIG_VERSION = "crs-equal-weights-v1"
-VALID_STUDY_CONDITIONS = {"MCRF", "LEGACY"}
+MIXED_METHOD_CONDITION = "MIXED"
+FIXED_METHOD_SEQUENCE = "MCRF_THEN_LEGACY"
+VALID_STUDY_CONDITIONS = {"MCRF", "LEGACY", MIXED_METHOD_CONDITION}
 VALID_SEQUENCE_ORDERS = {"MCRF_THEN_LEGACY", "LEGACY_THEN_MCRF"}
 
 
@@ -96,7 +98,10 @@ def _next_participant_id(db: Session) -> str:
 
 
 def _assigned_condition_for_participant_id(participant_id: str) -> str:
-    return "MCRF" if (_participant_number(participant_id) % 2 == 1) else "LEGACY"
+    # The actual study is within-subject: every participant receives both
+    # methods in one assessment.  Keep the legacy field for historical rows,
+    # but make its value truthful for newly created study records.
+    return MIXED_METHOD_CONDITION
 
 
 def get_or_create_research_participant(user_id: str, db: Optional[Session] = None) -> dict:
@@ -108,11 +113,7 @@ def get_or_create_research_participant(user_id: str, db: Optional[Session] = Non
         ).scalar_one_or_none()
         if row is None:
             participant_id = _next_participant_id(db)
-            sequence_order = (
-                "MCRF_THEN_LEGACY"
-                if (_participant_number(participant_id) % 2 == 1)
-                else "LEGACY_THEN_MCRF"
-            )
+            sequence_order = FIXED_METHOD_SEQUENCE
             row = ResearchParticipant(
                 participant_id=participant_id,
                 user_id=user_id,
@@ -123,8 +124,13 @@ def get_or_create_research_participant(user_id: str, db: Optional[Session] = Non
             db.flush()
             if owns_session:
                 db.commit()
-        elif not row.assigned_condition:
-            row.assigned_condition = _assigned_condition_for_participant_id(row.participant_id)
+        else:
+            # New sessions always follow the same within-assessment order;
+            # participant-level A/B assignment is no longer part of the
+            # protocol.  Existing completed study_sessions retain their own
+            # historical condition/sequence values.
+            row.sequence_order = FIXED_METHOD_SEQUENCE
+            row.assigned_condition = MIXED_METHOD_CONDITION
             db.flush()
             if owns_session:
                 db.commit()
@@ -140,19 +146,6 @@ def get_or_create_research_participant(user_id: str, db: Optional[Session] = Non
             db.close()
 
 
-def _condition_for_next_session(db: Session, participant: ResearchParticipant) -> str:
-    count = db.execute(
-        select(func.count(StudySession.study_session_id))
-        .where(StudySession.participant_id == participant.participant_id)
-    ).scalar_one()
-    first, second = (
-        ("MCRF", "LEGACY")
-        if participant.sequence_order == "MCRF_THEN_LEGACY"
-        else ("LEGACY", "MCRF")
-    )
-    return first if int(count or 0) % 2 == 0 else second
-
-
 def create_study_session(
     user_id: str,
     course_id: Optional[str] = None,
@@ -163,15 +156,14 @@ def create_study_session(
     try:
         participant_doc = get_or_create_research_participant(user_id, db)
         participant = db.get(ResearchParticipant, participant_doc["participant_id"])
-        if not participant.assigned_condition:
-            participant.assigned_condition = _assigned_condition_for_participant_id(participant.participant_id)
-            db.flush()
-        condition = participant.assigned_condition
+        participant.sequence_order = FIXED_METHOD_SEQUENCE
+        participant.assigned_condition = MIXED_METHOD_CONDITION
+        condition = MIXED_METHOD_CONDITION
         row = StudySession(
             participant_id=participant.participant_id,
             user_id=user_id,
             condition=condition,
-            sequence_order=participant.sequence_order,
+            sequence_order=FIXED_METHOD_SEQUENCE,
             course_id=course_id,
             module_id=module_id or course_id,
             video_id=video_id,
@@ -200,6 +192,7 @@ def get_or_create_study_session_for_material(
             .where(
                 StudySession.user_id == user_id,
                 StudySession.course_id == course_id,
+                StudySession.experiment_version == EXPERIMENT_VERSION,
                 StudySession.completion_status == "started",
             )
             .order_by(StudySession.started_at.desc())
@@ -239,6 +232,7 @@ def get_or_create_active_study_session(
             select(StudySession)
             .where(
                 StudySession.user_id == user_id,
+                StudySession.experiment_version == EXPERIMENT_VERSION,
                 StudySession.completion_status == "started",
             )
             .order_by(StudySession.started_at.desc())
@@ -296,6 +290,121 @@ def study_session_to_dict(row: StudySession) -> dict:
         "camera_opted_out": row.camera_opted_out,
         "camera_revoked": row.camera_revoked,
     }
+
+
+def record_completed_video(
+    study_session_id: str,
+    user_id: str,
+    video_id: str,
+    transcript_text: Optional[str] = None,
+) -> dict:
+    """Persist one completed video without treating an opened video as done.
+
+    The client calls this only from a terminal playback event.  Repeating a
+    completion event is intentionally idempotent and may enrich a previously
+    empty transcript, but never changes the original order or timestamp.
+    """
+    db = _session()
+    try:
+        study = db.get(StudySession, study_session_id)
+        if not study or study.user_id != user_id:
+            raise ValueError("Invalid study_session_id for current user")
+        if study.completion_status != "started":
+            raise ValueError("Study session is no longer accepting completed videos")
+        if not video_id:
+            raise ValueError("video_id is required")
+
+        existing = db.execute(
+            select(StudyVideoCompletion).where(
+                StudyVideoCompletion.study_session_id == study_session_id,
+                StudyVideoCompletion.video_id == video_id,
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            next_order = int(
+                db.execute(
+                    select(func.count(StudyVideoCompletion.id)).where(
+                        StudyVideoCompletion.study_session_id == study_session_id
+                    )
+                ).scalar_one()
+                or 0
+            ) + 1
+            existing = StudyVideoCompletion(
+                study_session_id=study_session_id,
+                participant_id=study.participant_id,
+                video_id=video_id,
+                completion_order=next_order,
+                transcript_text=(transcript_text or None),
+            )
+            db.add(existing)
+            if not study.video_id:
+                study.video_id = video_id
+        elif transcript_text and not (existing.transcript_text or "").strip():
+            existing.transcript_text = transcript_text
+
+        db.commit()
+        db.refresh(existing)
+        return {
+            "study_session_id": study_session_id,
+            "video_id": existing.video_id,
+            "completion_order": existing.completion_order,
+            "completed_at": existing.completed_at.isoformat(),
+        }
+    finally:
+        db.close()
+
+
+def get_completed_video_context(study_session_id: str) -> dict:
+    """Return the ordered, server-recorded material eligible for assessment."""
+    db = _session()
+    try:
+        rows = db.execute(
+            select(StudyVideoCompletion)
+            .where(StudyVideoCompletion.study_session_id == study_session_id)
+            .order_by(StudyVideoCompletion.completion_order.asc())
+        ).scalars().all()
+        return {
+            "contributing_video_ids": [row.video_id for row in rows],
+            "transcript_text": "\n\n".join(
+                f"[Video {row.video_id}]\n{row.transcript_text.strip()}"
+                for row in rows
+                if row.transcript_text and row.transcript_text.strip()
+            ),
+            "videos": [
+                {
+                    "video_id": row.video_id,
+                    "completion_order": row.completion_order,
+                    "completed_at": row.completed_at.isoformat(),
+                    "transcript_present": bool(row.transcript_text and row.transcript_text.strip()),
+                }
+                for row in rows
+            ],
+        }
+    finally:
+        db.close()
+
+
+def get_completed_video_behavioral_score(study_session_id: str) -> float:
+    """Average only observations for videos actually completed in this study."""
+    db = _session()
+    try:
+        completed_ids = {
+            row[0]
+            for row in db.execute(
+                select(StudyVideoCompletion.video_id).where(
+                    StudyVideoCompletion.study_session_id == study_session_id
+                )
+            ).all()
+        }
+        if not completed_ids:
+            return 50.0
+        logs = db.execute(
+            select(AttentionLog).where(AttentionLog.study_session_id == study_session_id)
+        ).scalars().all()
+        scores = [float(log.score) for log in logs if log.video_id in completed_ids and log.score is not None]
+        return sum(scores) / len(scores) if scores else 50.0
+    finally:
+        db.close()
 
 
 # ── Users / Students ────────────────────────────────────────
@@ -444,6 +553,11 @@ def get_assessment_session(session_id: str) -> Optional[dict]:
             "attention_score_during_video": s.attention_score_during_video,
             "transcript_text": s.transcript_text,
             "adaptive_state": s.adaptive_state or {},
+            "adaptive_metadata": (s.adaptive_state or {}).get("adaptive_metadata", {
+                "previous_score": None,
+                "adjusted_difficulty": s.difficulty,
+                "reason": "Assessment protocol initialized.",
+            }),
         }
     finally:
         db.close()
@@ -475,6 +589,11 @@ def get_canonical_assessment_session_for_study(study_session_id: str) -> Optiona
             "attention_score_during_video": row.attention_score_during_video,
             "transcript_text": row.transcript_text,
             "adaptive_state": row.adaptive_state or {},
+            "adaptive_metadata": (row.adaptive_state or {}).get("adaptive_metadata", {
+                "previous_score": None,
+                "adjusted_difficulty": row.difficulty,
+                "reason": "Assessment protocol initialized.",
+            }),
         }
     finally:
         db.close()
@@ -626,7 +745,7 @@ def save_generated_questions(session: dict) -> None:
                 assessment_session_id=session.get("id"),
                 model_version=meta.get("model"),
                 generated_live_fallback=meta.get("generated_from"),
-                source_material=session.get("video_id") or session.get("course_id"),
+                source_material=", ".join(session.get("contributing_video_ids") or []) or session.get("video_id") or session.get("course_id"),
                 difficulty=q.get("difficulty"),
                 bloom_level=meta.get("blooms_level"),
                 generation_timestamp=datetime.utcnow(),
@@ -646,6 +765,7 @@ def save_question_responses(
     response_events: Optional[list[dict]],
     submitted_at: datetime,
     total_time_spent: float,
+    decision_method: Optional[str] = None,
 ) -> list[dict]:
     questions = assessment_session.get("questions", [])
     events = {e.get("question_id"): e for e in (response_events or []) if e.get("question_id")}
@@ -696,6 +816,10 @@ def save_question_responses(
                     question_index=idx,
                 )
                 db.add(existing)
+            method = decision_method or q.get("adaptive_method") or study_session.get("condition")
+            if method not in {"MCRF", "LEGACY"}:
+                method = None
+            existing.condition = method or existing.condition
             existing.question_difficulty = q.get("difficulty")
             existing.question_source = meta.get("generated_from")
             existing.model_provider = meta.get("model")
@@ -711,6 +835,7 @@ def save_question_responses(
             rows_out.append({
                 "question_id": question_id,
                 "question_index": idx,
+                "condition": method,
                 "response_time_seconds": response_time,
                 "correctness": correct,
                 "status": status,
@@ -730,6 +855,7 @@ def save_single_question_response(
     answer,
     response_event: Optional[dict],
     submitted_at: datetime,
+    decision_method: Optional[str] = None,
 ) -> dict:
     event = dict(response_event or {})
     event.setdefault("question_id", question["id"])
@@ -741,6 +867,7 @@ def save_single_question_response(
         response_events=[event],
         submitted_at=submitted_at,
         total_time_spent=float(event.get("response_time_seconds") or 0),
+        decision_method=decision_method,
     )
     return rows[0]
 
@@ -784,6 +911,11 @@ def update_assessment_adaptive_state(
             "attention_score_during_video": row.attention_score_during_video,
             "transcript_text": row.transcript_text,
             "adaptive_state": row.adaptive_state or {},
+            "adaptive_metadata": (row.adaptive_state or {}).get("adaptive_metadata", {
+                "previous_score": None,
+                "adjusted_difficulty": row.difficulty,
+                "reason": "Assessment protocol initialized.",
+            }),
         }
     finally:
         db.close()
@@ -800,9 +932,10 @@ def save_research_crs_decision(
     attention_score: float,
     transcript_text: Optional[str],
     decision_index: Optional[int] = None,
+    method: str = "MCRF",
 ) -> Optional[dict]:
     crs_block = adaptive_result.get("crs")
-    if not crs_block or study_session["condition"] != "MCRF":
+    if not crs_block or method != "MCRF":
         return None
     db = _session()
     try:
@@ -836,7 +969,7 @@ def save_research_crs_decision(
             study_session_id=study_session["study_session_id"],
             assessment_session_id=assessment_session["id"],
             participant_id=study_session["participant_id"],
-            condition=study_session["condition"],
+            condition=method,
             decision_index=decision_index,
             timestamp=datetime.utcnow(),
             performance=components["performance"],
@@ -880,8 +1013,9 @@ def save_research_legacy_decision(
     previous_difficulty: str,
     current_score: float,
     decision_index: Optional[int] = None,
+    method: str = "LEGACY",
 ) -> Optional[dict]:
-    if study_session["condition"] != "LEGACY":
+    if method != "LEGACY":
         return None
     db = _session()
     try:
@@ -904,7 +1038,7 @@ def save_research_legacy_decision(
             study_session_id=study_session["study_session_id"],
             assessment_session_id=assessment_session["id"],
             participant_id=study_session["participant_id"],
-            condition=study_session["condition"],
+            condition=method,
             decision_index=decision_index,
             timestamp=datetime.utcnow(),
             performance_input=current_score,

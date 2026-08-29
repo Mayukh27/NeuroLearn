@@ -262,6 +262,11 @@ class AssessmentQuestion(BaseModel):
     explanation: str
     topic_id: str
     llm_metadata: LLMQuestionMetadata
+    # Assigned by the assessment orchestrator, not the client.  This makes
+    # the fixed MCRF (1--5) / LEGACY (6--10) sequence visible in each item
+    # while remaining additive for older generated-question payloads.
+    adaptive_method: Optional[Literal["MCRF", "LEGACY"]] = None
+    decision_index: Optional[int] = None
 
 
 class AdaptiveMetadata(BaseModel):
@@ -275,7 +280,7 @@ class AssessmentSession(BaseModel):
     id: str
     study_session_id: Optional[str] = None
     participant_id: Optional[str] = None
-    condition: Optional[Literal["MCRF", "LEGACY"]] = None
+    condition: Optional[Literal["MCRF", "LEGACY", "MIXED"]] = None
     course_id: str
     video_id: str
     contributing_video_ids: list[str] = []
@@ -330,7 +335,7 @@ class AssessmentResult(BaseModel):
     session_id: str
     study_session_id: Optional[str] = None
     participant_id: Optional[str] = None
-    condition: Optional[Literal["MCRF", "LEGACY"]] = None
+    condition: Optional[Literal["MCRF", "LEGACY", "MIXED"]] = None
     score: float
     total_points: int
     earned_points: int

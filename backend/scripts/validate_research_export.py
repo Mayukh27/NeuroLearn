@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import sys
 from collections import Counter
 from pathlib import Path
@@ -17,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 REQUIRED_FILES = [
     "participants.csv",
     "study_sessions.csv",
+    "study_video_completions.csv",
     "assessments.csv",
     "question_responses.csv",
     "crs_decisions.csv",
@@ -26,7 +28,7 @@ REQUIRED_FILES = [
     "generated_questions.csv",
 ]
 DIFFICULTIES = {"easy", "medium", "hard", ""}
-CONDITIONS = {"MCRF", "LEGACY"}
+CONDITIONS = {"MCRF", "LEGACY", "MIXED"}
 
 
 def _read(path: Path) -> list[dict]:
@@ -60,7 +62,7 @@ def validate(export_dir: Path) -> tuple[list[str], list[str], list[str]]:
     assessments = {r.get("id"): r for r in data["assessments.csv"]}
 
     for table_name in [
-        "study_sessions.csv", "assessments.csv", "question_responses.csv",
+        "study_sessions.csv", "study_video_completions.csv", "assessments.csv", "question_responses.csv",
         "crs_decisions.csv", "legacy_decisions.csv", "behavioral_summaries.csv", "prepost_results.csv",
         "generated_questions.csv",
     ]:
@@ -111,6 +113,8 @@ def validate(export_dir: Path) -> tuple[list[str], list[str], list[str]]:
             failures.append(f"FAIL question_responses.csv:{i} impossible response_time_seconds={response_time}")
         if not row.get("condition"):
             failures.append(f"FAIL question_responses.csv:{i} missing condition")
+        elif row.get("condition") not in {"MCRF", "LEGACY"}:
+            failures.append(f"FAIL question_responses.csv:{i} invalid decision method={row.get('condition')}")
 
     for i, row in enumerate(data["crs_decisions.csv"], start=2):
         missing = [
@@ -125,7 +129,7 @@ def validate(export_dir: Path) -> tuple[list[str], list[str], list[str]]:
         if row.get("selected_difficulty", "") not in DIFFICULTIES:
             failures.append(f"FAIL crs_decisions.csv:{i} invalid selected_difficulty={row.get('selected_difficulty')}")
         if row.get("condition") != "MCRF":
-            warnings.append(f"WARN crs_decisions.csv:{i} CRS decision stored for non-MCRF condition")
+            failures.append(f"FAIL crs_decisions.csv:{i} CRS decision stored for non-MCRF condition")
 
     for i, row in enumerate(data["legacy_decisions.csv"], start=2):
         assessment_id = row.get("assessment_session_id")
@@ -150,6 +154,64 @@ def validate(export_dir: Path) -> tuple[list[str], list[str], list[str]]:
             failures.append(f"FAIL study_sessions.csv missing condition for {study_id}")
         if not row.get("started_at"):
             failures.append(f"FAIL study_sessions.csv missing started_at for {study_id}")
+
+    completions_by_study: dict[str, list[dict]] = {}
+    for row in data["study_video_completions.csv"]:
+        completions_by_study.setdefault(row.get("study_session_id", ""), []).append(row)
+    for study_id, completions in completions_by_study.items():
+        order = [int(row["completion_order"]) for row in completions if row.get("completion_order", "").isdigit()]
+        if sorted(order) != list(range(1, len(completions) + 1)):
+            failures.append(f"FAIL study_video_completions.csv invalid completion order for {study_id}")
+        ids = [row.get("video_id") for row in sorted(completions, key=lambda value: int(value.get("completion_order") or 0))]
+        if len(ids) != len(set(ids)):
+            failures.append(f"FAIL study_video_completions.csv duplicate completed video for {study_id}")
+
+    crs_by_assessment: dict[str, list[dict]] = {}
+    for row in data["crs_decisions.csv"]:
+        crs_by_assessment.setdefault(row.get("assessment_session_id", ""), []).append(row)
+    legacy_by_assessment: dict[str, list[dict]] = {}
+    for row in data["legacy_decisions.csv"]:
+        legacy_by_assessment.setdefault(row.get("assessment_session_id", ""), []).append(row)
+    responses_by_assessment: dict[str, list[dict]] = {}
+    for row in data["question_responses.csv"]:
+        responses_by_assessment.setdefault(row.get("assessment_session_id", ""), []).append(row)
+
+    for assessment_id, assessment in assessments.items():
+        if assessment.get("condition") != "MIXED":
+            continue  # historical, one-method exports remain valid.
+        study_id = assessment.get("study_session_id", "")
+        completed_videos = sorted(
+            completions_by_study.get(study_id, []),
+            key=lambda value: int(value.get("completion_order") or 0),
+        )
+        try:
+            contributors = json.loads(assessment.get("contributing_video_ids") or "[]")
+        except json.JSONDecodeError:
+            failures.append(f"FAIL assessments.csv invalid contributing_video_ids for {assessment_id}")
+            contributors = []
+        if contributors != [row.get("video_id") for row in completed_videos]:
+            failures.append(f"FAIL assessments.csv contributing videos do not match completed order for {assessment_id}")
+
+        is_completed = assessment.get("completion_status") == "completed"
+        if not is_completed:
+            continue
+        responses = sorted(
+            responses_by_assessment.get(assessment_id, []),
+            key=lambda value: int(value.get("question_index") or -1),
+        )
+        if len(responses) != 10:
+            failures.append(f"FAIL mixed assessment {assessment_id} has {len(responses)} responses; expected 10")
+            continue
+        if [row.get("question_index") for row in responses] != [str(index) for index in range(10)]:
+            failures.append(f"FAIL mixed assessment {assessment_id} has non-sequential question indexes")
+        if [row.get("condition") for row in responses] != ["MCRF"] * 5 + ["LEGACY"] * 5:
+            failures.append(f"FAIL mixed assessment {assessment_id} does not use MCRF then LEGACY response segments")
+        crs_indexes = sorted(int(row.get("decision_index") or 0) for row in crs_by_assessment.get(assessment_id, []))
+        legacy_indexes = sorted(int(row.get("decision_index") or 0) for row in legacy_by_assessment.get(assessment_id, []))
+        if crs_indexes != [1, 2, 3, 4, 5]:
+            failures.append(f"FAIL mixed assessment {assessment_id} has MCRF decisions {crs_indexes}; expected 1-5")
+        if legacy_indexes != [6, 7, 8, 9, 10]:
+            failures.append(f"FAIL mixed assessment {assessment_id} has LEGACY decisions {legacy_indexes}; expected 6-10")
 
     if not failures:
         passes.append("PASS no failing integrity checks")

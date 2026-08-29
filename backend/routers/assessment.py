@@ -1,70 +1,332 @@
-"""
-============================================================
-ROUTER: Assessment — Quiz generation, submission, results
-Endpoints:
-    POST /api/assessment/generate  — generate quiz from transcript + difficulty
-    POST /api/assessment/submit    — submit answers, get adaptive result
-    GET  /api/assessment/session/{id} — get session details
-============================================================
+"""Assessment orchestration for the fixed mixed-method research protocol.
+
+One study session produces one 10-item assessment: MCRF chooses the
+difficulties for questions 1--5, then LEGACY chooses questions 6--10.  The
+engines themselves remain in :mod:`ml.adaptive_engine`; this router owns only
+their protocol, evidence flow, and durable study logging.
 """
 
-import uuid
+from __future__ import annotations
+
+import re
 import time
+import uuid
 from datetime import datetime
-from fastapi import APIRouter, HTTPException, Depends
+
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+
+from auth.security import get_current_user
+from data.database import (
+    advance_challenge_progress,
+    apply_xp,
+    complete_study_session,
+    get_canonical_assessment_session_for_study,
+    get_completed_video_behavioral_score,
+    get_completed_video_context,
+    get_or_create_active_study_session,
+    get_recent_scores_pct,
+    get_student_results,
+    get_assessment_session,
+    refresh_behavioral_summary,
+    save_assessment_result,
+    save_assessment_session,
+    save_crs_record,
+    save_generated_questions,
+    save_research_crs_decision,
+    save_research_legacy_decision,
+    save_single_question_response,
+    update_assessment_adaptive_state,
+)
+from data.db import get_db
+from data.models_orm import User
+from ml import adaptive_engine, question_generator
 from schemas.models import (
-    AssessmentSession,
     AssessmentResult,
+    AssessmentSession,
     GenerateAssessmentRequest,
     SubmitAdaptiveAnswerRequest,
     SubmitAssessmentRequest,
 )
-from ml import question_generator, adaptive_engine
-from data.database import (
-    save_assessment_session,
-    get_assessment_session,
-    save_assessment_result,
-    get_student_results,
-    get_recent_scores_pct,
-    save_crs_record,
-    advance_challenge_progress,
-    apply_xp,
-    get_or_create_active_study_session,
-    get_canonical_assessment_session_for_study,
-    save_generated_questions,
-    save_question_responses,
-    save_single_question_response,
-    save_research_crs_decision,
-    save_research_legacy_decision,
-    update_assessment_adaptive_state,
-    refresh_behavioral_summary,
-    complete_study_session,
-)
-from data.db import get_db
-from data.models_orm import User
-from auth.security import get_current_user
+
 
 router = APIRouter(prefix="/api/assessment", tags=["Assessment"])
 
-TARGET_ADAPTIVE_ROUNDS = 12
+TOTAL_QUESTIONS = 10
+MCRF_QUESTION_COUNT = 5
+METHOD_SEQUENCE = ["MCRF"] * MCRF_QUESTION_COUNT + ["LEGACY"] * (TOTAL_QUESTIONS - MCRF_QUESTION_COUNT)
+PER_QUESTION_TIME_LIMIT_SECONDS = 42
+TIME_LIMIT_SECONDS = TOTAL_QUESTIONS * PER_QUESTION_TIME_LIMIT_SECONDS
 
 
 def _apply_xp(user: User, amount: int, db: Session) -> dict:
-    """
-    Actually persist earned XP to the student's record, with the same
-    level-up math as POST /api/student/xp.
-
-    FIX (real XP request): submit_assessment previously computed
-    `xp_earned` and returned it in the response WITHOUT ever writing it
-    to the student's record — the number shown to the frontend was
-    real-looking but never actually banked, so it never moved the
-    leaderboard or the student's level. This is the fix: XP is now
-    credited here, in the same transaction as the assessment result.
-    """
     xp_result = apply_xp(user, amount)
     db.commit()
     return xp_result
+
+
+def _method_for_question(question_index: int) -> str:
+    if not 0 <= question_index < TOTAL_QUESTIONS:
+        raise ValueError(f"Question index must be between 0 and {TOTAL_QUESTIONS - 1}")
+    return METHOD_SEQUENCE[question_index]
+
+
+def _question_text_key(question: dict) -> str:
+    return re.sub(r"\s+", " ", str(question.get("question", "")).strip().casefold())
+
+
+def _generate_unique_question(
+    *,
+    transcript_text: str,
+    difficulty: str,
+    topic_id: str,
+    existing_questions: list[dict],
+    method: str,
+    question_index: int,
+) -> dict:
+    """Generate exactly one new, non-duplicate item for the current session."""
+    existing_ids = {str(question.get("id")) for question in existing_questions}
+    existing_texts = {_question_text_key(question) for question in existing_questions}
+    for _ in range(20):
+        generated = question_generator.generate_questions(
+            transcript_text=transcript_text,
+            difficulty=difficulty,
+            num_questions=1,
+            topic_id=topic_id,
+        )
+        if not generated:
+            continue
+        question = dict(generated[0])
+        if question.get("id") in existing_ids or _question_text_key(question) in existing_texts:
+            continue
+        question["adaptive_method"] = method
+        question["decision_index"] = question_index + 1
+        return question
+    raise HTTPException(
+        status_code=503,
+        detail="Could not generate a unique question for this assessment. Please retry later.",
+    )
+
+
+def _assessment_score(responses: list[dict]) -> float:
+    answered = [response for response in responses if response.get("correctness") is not None]
+    if not answered:
+        return 0.0
+    return round(100.0 * sum(bool(response["correctness"]) for response in answered) / len(answered), 1)
+
+
+def _responses_for_method(responses: list[dict], method: str) -> list[dict]:
+    return [response for response in responses if response.get("condition") == method]
+
+
+def _decision_for_question(
+    *,
+    question_index: int,
+    student_id: str,
+    session: dict,
+    durable_scores: list[float],
+    responses: list[dict],
+) -> dict:
+    """Ask the method assigned to *this* question for its difficulty.
+
+    MCRF receives the completed-video B/C evidence plus cumulative assessment
+    performance and response timing.  LEGACY deliberately receives only the
+    traditional score/history/timing inputs; video behavioral evidence,
+    transcript complexity, and CRS are not passed into its baseline path.
+    """
+    method = _method_for_question(question_index)
+    if question_index == 0:
+        return adaptive_engine.get_initial_difficulty(
+            student_id=student_id,
+            attention_score=session["attention_score_during_video"],
+            previous_score=durable_scores[-1] if durable_scores else None,
+            previous_scores=durable_scores,
+            transcript_text=session.get("transcript_text") or "",
+        )
+
+    prior_question = session["questions"][question_index - 1]
+    prior_difficulty = prior_question.get("difficulty") or session.get("difficulty", "medium")
+    completed_for_method = _responses_for_method(responses, method)
+    # At the MCRF -> LEGACY boundary no LEGACY item has yet been answered.
+    # The baseline's history therefore begins with the assessment performance
+    # accumulated so far, as a genuine traditional performance/history input.
+    evidence_responses = completed_for_method or responses
+    cumulative_score = _assessment_score(evidence_responses)
+    timing_values = [
+        float(response["response_time_seconds"])
+        for response in evidence_responses
+        if response.get("response_time_seconds") is not None
+    ]
+    total_time = sum(timing_values)
+    time_limit = PER_QUESTION_TIME_LIMIT_SECONDS * max(len(evidence_responses), 1)
+    assessment_history = [
+        _assessment_score(evidence_responses[:index + 1])
+        for index in range(len(evidence_responses))
+    ]
+    previous_scores = (durable_scores + assessment_history[:-1])[-5:]
+    was_correct = bool(evidence_responses[-1].get("correctness")) if evidence_responses else False
+
+    if method == "LEGACY":
+        return adaptive_engine._determine_difficulty_legacy(
+            student_id=student_id,
+            current_score=cumulative_score,
+            # Neutral rather than video-derived: this is the CRS-free
+            # performance/history baseline, not an MCRF multimodal decision.
+            attention_score=50,
+            time_spent=total_time,
+            time_limit=time_limit,
+            previous_difficulty=prior_difficulty,
+            previous_scores=previous_scores,
+        )
+
+    return adaptive_engine.determine_difficulty(
+        student_id=student_id,
+        current_score=cumulative_score,
+        attention_score=session["attention_score_during_video"],
+        time_spent=total_time,
+        time_limit=time_limit,
+        previous_difficulty=prior_difficulty,
+        previous_scores=previous_scores,
+        transcript_text=session.get("transcript_text") or "",
+        was_correct=was_correct,
+    )
+
+
+def _record_decision(
+    *,
+    method: str,
+    study_session: dict,
+    assessment_session: dict,
+    adaptive_result: dict,
+    previous_scores: list[float],
+    responses: list[dict],
+    previous_difficulty: str | None,
+    decision_index: int,
+) -> None:
+    if method == "MCRF":
+        crs = adaptive_result.get("crs")
+        if not crs:
+            raise RuntimeError("MCRF decision did not return a CRS record")
+        selected_difficulty = adaptive_result.get("difficulty", adaptive_result.get("next_assessment_difficulty"))
+        save_crs_record({
+            "student_id": assessment_session["student_id"],
+            "study_session_id": study_session["study_session_id"],
+            "participant_id": study_session["participant_id"],
+            "condition": "MCRF",
+            "assessment_id": assessment_session["id"],
+            "timestamp": time.time(),
+            "performance": crs["components"]["performance"],
+            "behavioral_cue": crs["components"]["behavioral_cue"],
+            "integrity": crs["components"]["integrity"],
+            "trend": crs["components"]["trend"],
+            "complexity": crs["components"]["complexity"],
+            "crs": crs["score"],
+            "difficulty": selected_difficulty,
+            "explanation": crs["explanation"],
+        })
+        save_research_crs_decision(
+            study_session=study_session,
+            assessment_session=assessment_session,
+            adaptive_result={**adaptive_result, "next_assessment_difficulty": selected_difficulty},
+            previous_scores=previous_scores,
+            per_question_responses=responses,
+            previous_difficulty=previous_difficulty or "",
+            attention_score=assessment_session["attention_score_during_video"],
+            transcript_text=assessment_session.get("transcript_text"),
+            decision_index=decision_index,
+            method="MCRF",
+        )
+        return
+
+    save_research_legacy_decision(
+        study_session=study_session,
+        assessment_session=assessment_session,
+        adaptive_result=adaptive_result,
+        previous_scores=previous_scores,
+        per_question_responses=responses,
+        previous_difficulty=previous_difficulty or "",
+        current_score=_assessment_score(responses),
+        decision_index=decision_index,
+        method="LEGACY",
+    )
+
+
+def _result_message(percentage: float) -> tuple[str, list[str]]:
+    if percentage >= 90:
+        return "Outstanding! You've truly mastered this material!", ["Next: Advanced Topics", "Challenge: Timed Quiz"]
+    if percentage >= 70:
+        return "Well done! You have a solid understanding.", ["Next: Advanced Topics", "Challenge: Timed Quiz"]
+    if percentage >= 50:
+        return "Decent effort! Review the videos to strengthen weak areas.", ["Review: Completed Videos", "Practice: Easier Questions"]
+    return "Don't worry! Rewatch the completed videos and try again — you'll improve.", ["Review: Completed Videos", "Practice: Easier Questions", "Resource: Study Guide"]
+
+
+def _finalize_assessment(
+    *,
+    session: dict,
+    study_session: dict,
+    state: dict,
+    current_user: User,
+    db: Session,
+) -> dict:
+    questions = session.get("questions", [])
+    answers = state.get("answers", {})
+    if len(questions) != TOTAL_QUESTIONS or len(answers) != TOTAL_QUESTIONS:
+        raise RuntimeError("Cannot complete an assessment before all ten protocol questions are answered")
+    correct_count = sum(answers.get(question["id"]) == question.get("correct_answer") for question in questions)
+    total_points = sum(int(question.get("points", 10)) for question in questions)
+    earned_points = sum(int(question.get("points", 10)) for question in questions if answers.get(question["id"]) == question.get("correct_answer"))
+    percentage = round((correct_count / TOTAL_QUESTIONS) * 100, 1)
+    xp_earned = int(earned_points * 1.5)
+    xp_result = _apply_xp(current_user, xp_earned, db)
+    if percentage >= 100:
+        advance_challenge_progress(current_user.id, "quiz", set_to=1)
+    last_adaptive = state.get("last_adaptive_response") or {
+        "performance_trend": "stable",
+        "recommended_action": "Assessment completed.",
+        "next_assessment_difficulty": questions[-1].get("difficulty", "medium"),
+        "strength_areas": [],
+        "weak_areas": [],
+    }
+    message, suggested_topics = _result_message(percentage)
+    result = {
+        "session_id": session["id"],
+        "study_session_id": study_session["study_session_id"],
+        "participant_id": study_session["participant_id"],
+        "condition": "MIXED",
+        "student_id": current_user.id,
+        "score": percentage,
+        "total_points": total_points,
+        "earned_points": earned_points,
+        "percentage": percentage,
+        "xp_earned": xp_earned,
+        "total_xp": xp_result["new_xp"],
+        "new_level": xp_result["new_level"],
+        "leveled_up": xp_result["leveled_up"],
+        "time_spent": int(sum(float(response.get("response_time_seconds") or 0) for response in state.get("responses", []))),
+        "correct_answers": correct_count,
+        "total_questions": TOTAL_QUESTIONS,
+        "difficulty": session.get("difficulty", "medium"),
+        "message": message,
+        "next_difficulty": last_adaptive["next_assessment_difficulty"],
+        "suggested_topics": suggested_topics,
+        "timestamp": time.time(),
+        "adaptive_response": {
+            "performance_trend": last_adaptive["performance_trend"],
+            "recommended_action": last_adaptive["recommended_action"],
+            "next_assessment_difficulty": last_adaptive["next_assessment_difficulty"],
+            "strength_areas": last_adaptive["strength_areas"],
+            "weak_areas": last_adaptive["weak_areas"],
+            # Question 10 is selected by LEGACY; CRS entries for questions
+            # 1--5 remain separately and precisely logged.
+            "crs": last_adaptive.get("crs"),
+        },
+        "completion_status": "completed",
+    }
+    save_assessment_result(result)
+    refresh_behavioral_summary(study_session["study_session_id"])
+    complete_study_session(study_session["study_session_id"], "completed")
+    return result
 
 
 @router.post("/generate", response_model=AssessmentSession)
@@ -72,24 +334,8 @@ async def generate_assessment(
     request: GenerateAssessmentRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Generate an adaptive assessment.
-
-    Flow:
-        1. Adaptive engine determines difficulty based on:
-           - Previous score
-           - Behavioral Cue level during video
-        2. Question generator (FLAN-T5) creates questions from transcript
-        3. Returns assessment session with questions
-
-    JSON Response includes adaptive_metadata explaining WHY
-    this difficulty was chosen.
-    """
-    # Auth request: the JWT is authoritative, not whatever student_id the
-    # client put in the request body — this closes the "pass a different
-    # student_id and read/act on someone else's data" gap.
+    """Start or resume the single 10-question mixed-method assessment."""
     request.student_id = current_user.id
-
     try:
         study_session = get_or_create_active_study_session(
             current_user.id,
@@ -100,136 +346,87 @@ async def generate_assessment(
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
 
-    # Camera is optional: an opt-out/no-camera session uses neutral B=50.
-    attention_score = request.attention_score
-    if attention_score is None:
-        attention_score = 50
-
-    # Step 1: Determine difficulty. The assigned server-side condition decides
-    # which policy runs; clients cannot switch policy by request parameters.
-    if study_session["condition"] == "LEGACY":
-        difficulty_result = adaptive_engine._get_initial_difficulty_legacy(
-            student_id=request.student_id,
-            attention_score=attention_score,
-            previous_score=request.previous_score,
-        )
-    else:
-        difficulty_result = adaptive_engine.get_initial_difficulty(
-            student_id=request.student_id,
-            attention_score=attention_score,
-            previous_score=request.previous_score,
-        )
-
-    difficulty = difficulty_result["difficulty"]
-    adaptive_metadata = difficulty_result["adaptive_metadata"]
+    completed_context = get_completed_video_context(study_session["study_session_id"])
+    contributing_video_ids = completed_context["contributing_video_ids"]
+    if not contributing_video_ids:
+        raise HTTPException(status_code=409, detail="Complete at least one video before starting the assessment.")
 
     existing_session = get_canonical_assessment_session_for_study(study_session["study_session_id"])
     if existing_session and existing_session.get("questions"):
-        return {
-            "id": existing_session["id"],
-            "study_session_id": study_session["study_session_id"],
-            "participant_id": study_session["participant_id"],
-            "condition": study_session["condition"],
-            "course_id": existing_session.get("course_id") or request.course_id,
-            "video_id": existing_session.get("video_id") or request.video_id,
-            "contributing_video_ids": existing_session.get("contributing_video_ids", []),
-            "questions": existing_session["questions"],
-            "difficulty": existing_session.get("difficulty", "medium"),
-            "time_limit": existing_session.get("time_limit", 420),
-            "attention_score_during_video": existing_session.get("attention_score_during_video", attention_score),
-            "adaptive_metadata": adaptive_metadata,
-        }
+        return existing_session
 
-    # Step 2: Generate questions
-    transcript_text = request.transcript_text or ""
-    questions = question_generator.generate_questions(
-        transcript_text=transcript_text,
-        difficulty=difficulty,
-        num_questions=1,
-        topic_id=request.course_id,
+    # The server-recorded completion rows, not client query parameters, are
+    # the sole source of contributing videos and transcript context.
+    transcript_text = completed_context["transcript_text"]
+    attention_score = get_completed_video_behavioral_score(study_session["study_session_id"])
+    durable_scores = get_recent_scores_pct(current_user.id, limit=5)
+    initial = _decision_for_question(
+        question_index=0,
+        student_id=current_user.id,
+        session={
+            "attention_score_during_video": attention_score,
+            "transcript_text": transcript_text,
+            "questions": [],
+            "difficulty": "medium",
+        },
+        durable_scores=durable_scores,
+        responses=[],
     )
-
-    # Step 3: Build session
-    session_id = existing_session["id"] if existing_session else f"session_{uuid.uuid4().hex[:12]}"
-    time_limits = {"easy": 600, "medium": 420, "hard": 300}
-
+    initial_difficulty = initial["difficulty"]
+    question = _generate_unique_question(
+        transcript_text=transcript_text,
+        difficulty=initial_difficulty,
+        topic_id=request.course_id,
+        existing_questions=[],
+        method="MCRF",
+        question_index=0,
+    )
+    adaptive_metadata = initial["adaptive_metadata"]
     session = {
-        "id": session_id,
+        "id": f"session_{uuid.uuid4().hex[:12]}",
         "study_session_id": study_session["study_session_id"],
         "participant_id": study_session["participant_id"],
-        "condition": study_session["condition"],
+        "condition": "MIXED",
         "course_id": request.course_id,
-        "video_id": request.video_id,
-        "contributing_video_ids": request.contributing_video_ids or ([request.video_id] if request.video_id else []),
-        "questions": questions,
-        "difficulty": difficulty,
-        "time_limit": time_limits.get(difficulty, 420),
+        "video_id": contributing_video_ids[-1],
+        "contributing_video_ids": contributing_video_ids,
+        "questions": [question],
+        "difficulty": initial_difficulty,
+        "time_limit": TIME_LIMIT_SECONDS,
         "attention_score_during_video": attention_score,
         "adaptive_metadata": adaptive_metadata,
-        "student_id": request.student_id,
-        "created_at": time.time(),
-        # Phase 10/12 addition: persisted so submit_assessment() can feed the
-        # SAME transcript into the Content Complexity (C) component when
-        # scoring this session, rather than complexity silently defaulting
-        # to neutral on every submission (the practical consequence of CR2
-        # if this field weren't threaded through).
+        "student_id": current_user.id,
         "transcript_text": transcript_text,
         "adaptive_state": {
-            "target_rounds": TARGET_ADAPTIVE_ROUNDS,
+            "target_questions": TOTAL_QUESTIONS,
+            "method_sequence": METHOD_SEQUENCE,
             "answered_count": 0,
-            "current_difficulty": difficulty,
             "answers": {},
-            "round_scores": [],
+            "responses": [],
+            "adaptive_metadata": adaptive_metadata,
+            "last_adaptive_response": {
+                "performance_trend": "stable",
+                "recommended_action": adaptive_metadata["reason"],
+                "next_assessment_difficulty": initial_difficulty,
+                "strength_areas": [],
+                "weak_areas": [],
+                "crs": initial.get("crs"),
+            },
         },
     }
-
-    # Save session
     save_assessment_session(session)
     save_generated_questions(session)
-
-    return session
-
-
-def _grade_question(question: dict, answer) -> tuple[bool, float, float]:
-    correct = answer == question.get("correct_answer")
-    points = float(question.get("points", 10))
-    earned = points if correct else 0.0
-    percentage = 100.0 if correct else 0.0
-    return correct, earned, percentage
-
-
-def _adaptive_decision_for_round(
-    *,
-    request_student_id: str,
-    study_session: dict,
-    session: dict,
-    current_score: float,
-    response_time: float,
-    previous_scores: list[float],
-    previous_difficulty: str,
-    was_correct: bool,
-) -> dict:
-    if study_session["condition"] == "LEGACY":
-        return adaptive_engine._determine_difficulty_legacy(
-            student_id=request_student_id,
-            current_score=current_score,
-            attention_score=session.get("attention_score_during_video", 50),
-            time_spent=response_time,
-            time_limit=session.get("time_limit", 420) / TARGET_ADAPTIVE_ROUNDS,
-            previous_difficulty=previous_difficulty,
-            previous_scores=previous_scores,
-        )
-    return adaptive_engine.determine_difficulty(
-        student_id=request_student_id,
-        current_score=current_score,
-        attention_score=session.get("attention_score_during_video", 50),
-        time_spent=response_time,
-        time_limit=session.get("time_limit", 420) / TARGET_ADAPTIVE_ROUNDS,
-        previous_difficulty=previous_difficulty,
-        previous_scores=previous_scores,
-        transcript_text=session.get("transcript_text"),
-        was_correct=was_correct,
+    _record_decision(
+        method="MCRF",
+        study_session=study_session,
+        assessment_session=session,
+        adaptive_result=initial,
+        previous_scores=durable_scores,
+        responses=[],
+        previous_difficulty=None,
+        decision_index=1,
     )
+    return session
 
 
 @router.post("/answer")
@@ -238,7 +435,7 @@ async def submit_adaptive_answer(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    request.student_id = current_user.id
+    """Record one sequential response and create at most the next item."""
     session = get_assessment_session(request.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Assessment session not found")
@@ -246,177 +443,122 @@ async def submit_adaptive_answer(
         raise HTTPException(status_code=403, detail="Not your session")
     if session.get("completion_status") == "completed":
         return {"completed": True, "session": session, "result": None}
-
-    study_session = get_or_create_active_study_session(
-        current_user.id,
-        requested_study_session_id=session["study_session_id"],
-    )
-    questions = session.get("questions", [])
-    question_index = next((idx for idx, q in enumerate(questions) if q.get("id") == request.question_id), -1)
-    if question_index < 0:
-        raise HTTPException(status_code=404, detail="Question not found in this assessment")
+    try:
+        study_session = get_or_create_active_study_session(
+            current_user.id,
+            requested_study_session_id=session["study_session_id"],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
 
     state = dict(session.get("adaptive_state") or {})
     answers = dict(state.get("answers") or {})
+    questions = list(session.get("questions") or [])
+    question_index = next((index for index, question in enumerate(questions) if question.get("id") == request.question_id), -1)
+    if question_index < 0:
+        raise HTTPException(status_code=404, detail="Question not found in this assessment")
     if request.question_id in answers:
         return {"completed": False, "session": session, "duplicate": True}
+    if question_index != len(answers):
+        raise HTTPException(status_code=409, detail="Assessment questions must be answered in order")
+    if question_index >= TOTAL_QUESTIONS:
+        raise HTTPException(status_code=409, detail="This assessment already contains its ten protocol questions")
 
     question = questions[question_index]
-    correct, earned_points, round_score = _grade_question(question, request.answer)
-    submitted_at = datetime.utcnow()
+    method = question.get("adaptive_method") or _method_for_question(question_index)
+    response_event = dict(request.response_event or {})
+    response_event["question_id"] = request.question_id
+    response_event["question_index"] = question_index
     response = save_single_question_response(
         study_session=study_session,
         assessment_session=session,
         question=question,
         question_index=question_index,
         answer=request.answer,
-        response_event=request.response_event,
-        submitted_at=submitted_at,
+        response_event=response_event,
+        submitted_at=datetime.utcnow(),
+        decision_method=method,
     )
-
-    round_scores = list(state.get("round_scores") or [])
-    durable_scores = get_recent_scores_pct(request.student_id, limit=5)
-    previous_scores = (durable_scores + round_scores)[-5:]
-    response_time = float((request.response_event or {}).get("response_time_seconds") or 0)
-    previous_difficulty = state.get("current_difficulty") or question.get("difficulty") or session.get("selected_difficulty") or session.get("difficulty", "medium")
-    adaptive_result = _adaptive_decision_for_round(
-        request_student_id=request.student_id,
-        study_session=study_session,
-        session=session,
-        current_score=round_score,
-        response_time=response_time,
-        previous_scores=previous_scores,
-        previous_difficulty=previous_difficulty,
-        was_correct=correct,
-    )
-
-    decision_index = question_index + 1
-    if adaptive_result.get("crs"):
-        save_crs_record({
-            "student_id": request.student_id,
-            "study_session_id": study_session["study_session_id"],
-            "participant_id": study_session["participant_id"],
-            "condition": study_session["condition"],
-            "assessment_id": request.session_id,
-            "timestamp": time.time(),
-            "performance": adaptive_result["crs"]["components"]["performance"],
-            "behavioral_cue": adaptive_result["crs"]["components"]["behavioral_cue"],
-            "integrity": adaptive_result["crs"]["components"]["integrity"],
-            "trend": adaptive_result["crs"]["components"]["trend"],
-            "complexity": adaptive_result["crs"]["components"]["complexity"],
-            "crs": adaptive_result["crs"]["score"],
-            "difficulty": adaptive_result["next_assessment_difficulty"],
-            "explanation": adaptive_result["crs"]["explanation"],
-        })
-        save_research_crs_decision(
-            study_session=study_session,
-            assessment_session=session,
-            adaptive_result=adaptive_result,
-            previous_scores=previous_scores + [round_score],
-            per_question_responses=[response],
-            previous_difficulty=previous_difficulty,
-            attention_score=session.get("attention_score_during_video", 50),
-            transcript_text=session.get("transcript_text"),
-            decision_index=decision_index,
-        )
-    else:
-        save_research_legacy_decision(
-            study_session=study_session,
-            assessment_session=session,
-            adaptive_result=adaptive_result,
-            previous_scores=previous_scores + [round_score],
-            per_question_responses=[response],
-            previous_difficulty=previous_difficulty,
-            current_score=round_score,
-            decision_index=decision_index,
-        )
-
+    responses = list(state.get("responses") or []) + [response]
     answers[request.question_id] = request.answer
-    round_scores.append(round_score)
     answered_count = len(answers)
-    target_rounds = int(state.get("target_rounds") or TARGET_ADAPTIVE_ROUNDS)
-    selected_difficulty = adaptive_result["next_assessment_difficulty"]
-    completed = answered_count >= target_rounds
 
-    result = None
-    if completed:
-        total_points = sum(float(q.get("points", 10)) for q in questions[:answered_count])
-        correct_count = sum(1 for q in questions[:answered_count] if answers.get(q["id"]) == q.get("correct_answer"))
-        earned_total = sum(float(q.get("points", 10)) for q in questions[:answered_count] if answers.get(q["id"]) == q.get("correct_answer"))
-        percentage = round((correct_count / max(answered_count, 1)) * 100, 1)
-        xp_earned = int(earned_total * 1.5)
-        xp_result = _apply_xp(current_user, xp_earned, db)
-        if percentage >= 100:
-            advance_challenge_progress(current_user.id, "quiz", set_to=1)
-        result = {
-            "session_id": request.session_id,
-            "study_session_id": study_session["study_session_id"],
-            "participant_id": study_session["participant_id"],
-            "condition": study_session["condition"],
-            "student_id": request.student_id,
-            "score": percentage,
-            "total_points": int(total_points),
-            "earned_points": earned_total,
-            "percentage": percentage,
-            "xp_earned": xp_earned,
-            "total_xp": xp_result["new_xp"],
-            "new_level": xp_result["new_level"],
-            "leveled_up": xp_result["leveled_up"],
-            "time_spent": int(sum(float(r.get("response_time_seconds") or 0) for r in state.get("responses", []) + [response])),
-            "correct_answers": correct_count,
-            "total_questions": answered_count,
-            "difficulty": session.get("difficulty", "medium"),
-            "message": "Assessment completed.",
-            "next_difficulty": selected_difficulty,
-            "suggested_topics": [],
-            "timestamp": time.time(),
-            "adaptive_response": {
-                "performance_trend": adaptive_result["performance_trend"],
-                "recommended_action": adaptive_result["recommended_action"],
-                "next_assessment_difficulty": selected_difficulty,
-                "strength_areas": adaptive_result["strength_areas"],
-                "weak_areas": adaptive_result["weak_areas"],
-                "crs": adaptive_result.get("crs"),
-            },
-            "completion_status": "completed",
-        }
-        save_assessment_result(result)
-        refresh_behavioral_summary(study_session["study_session_id"])
-        complete_study_session(study_session["study_session_id"], "completed")
-    else:
-        next_question = question_generator.generate_questions(
-            transcript_text=session.get("transcript_text") or "",
-            difficulty=selected_difficulty,
-            num_questions=1,
-            topic_id=session.get("course_id") or "course_001",
-        )[0]
-        questions = questions + [next_question]
-        save_generated_questions({**session, "questions": [next_question]})
+    if answered_count == TOTAL_QUESTIONS:
+        new_state = {**state, "answers": answers, "responses": responses, "answered_count": answered_count}
+        updated = update_assessment_adaptive_state(
+            session["id"], adaptive_state=new_state, completion_status="completed"
+        )
+        result = _finalize_assessment(
+            session={**session, "questions": questions},
+            study_session=study_session,
+            state=new_state,
+            current_user=current_user,
+            db=db,
+        )
+        return {"completed": True, "session": updated, "result": result}
 
+    next_index = answered_count
+    next_method = _method_for_question(next_index)
+    durable_scores = get_recent_scores_pct(current_user.id, limit=5)
+    adaptive_result = _decision_for_question(
+        question_index=next_index,
+        student_id=current_user.id,
+        session={**session, "questions": questions},
+        durable_scores=durable_scores,
+        responses=responses,
+    )
+    next_difficulty = adaptive_result.get("difficulty", adaptive_result.get("next_assessment_difficulty"))
+    next_question = _generate_unique_question(
+        transcript_text=session.get("transcript_text") or "",
+        difficulty=next_difficulty,
+        topic_id=session.get("course_id") or "course_001",
+        existing_questions=questions,
+        method=next_method,
+        question_index=next_index,
+    )
+    questions.append(next_question)
+    evidence_responses = _responses_for_method(responses, next_method) or responses
+    performance_history = (durable_scores + [
+        _assessment_score(evidence_responses[:index + 1])
+        for index in range(len(evidence_responses))
+    ])[-5:]
+    _record_decision(
+        method=next_method,
+        study_session=study_session,
+        assessment_session={**session, "questions": questions},
+        adaptive_result=adaptive_result,
+        previous_scores=performance_history,
+        responses=evidence_responses,
+        previous_difficulty=question.get("difficulty"),
+        decision_index=next_index + 1,
+    )
+    last_adaptive = {
+        "performance_trend": adaptive_result["performance_trend"],
+        "recommended_action": adaptive_result["recommended_action"],
+        "next_assessment_difficulty": next_difficulty,
+        "strength_areas": adaptive_result["strength_areas"],
+        "weak_areas": adaptive_result["weak_areas"],
+        "crs": adaptive_result.get("crs"),
+    }
     new_state = {
         **state,
-        "target_rounds": target_rounds,
-        "answered_count": answered_count,
-        "current_difficulty": selected_difficulty,
         "answers": answers,
-        "round_scores": round_scores,
-        "responses": list(state.get("responses") or []) + [response],
+        "responses": responses,
+        "answered_count": answered_count,
+        "last_adaptive_response": last_adaptive,
     }
     updated = update_assessment_adaptive_state(
-        request.session_id,
+        session["id"],
         questions=questions,
-        selected_difficulty=selected_difficulty,
+        selected_difficulty=next_difficulty,
         adaptive_state=new_state,
-        completion_status="completed" if completed else "started",
+        completion_status="started",
     )
+    save_generated_questions({**session, "questions": [next_question]})
     return {
-        "completed": completed,
+        "completed": False,
         "session": updated,
-        "result": result,
-        "adaptive_response": {
-            "next_assessment_difficulty": selected_difficulty,
-            "crs": adaptive_result.get("crs"),
-        },
+        "adaptive_response": {"next_assessment_difficulty": next_difficulty, "crs": adaptive_result.get("crs")},
     }
 
 
@@ -424,247 +566,21 @@ async def submit_adaptive_answer(
 async def submit_assessment(
     request: SubmitAssessmentRequest,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
 ):
-    """
-    Submit assessment answers and get adaptive results.
-
-    Flow:
-        1. Retrieve session with correct answers
-        2. Grade submission
-        3. Run adaptive engine → determine next difficulty
-        4. Award XP
-        5. Return detailed results with adaptive response
-
-    The adaptive_response JSON tells the frontend:
-        - performance_trend (improving/stable/declining)
-        - next_assessment_difficulty
-        - strength/weak areas
-        - recommended action text
-    """
-    # Auth request: identity comes from the JWT, not the request body.
-    request.student_id = current_user.id
-
-    # Get session
+    """Retained endpoint with a clear guard against bypassing protocol order."""
     session = get_assessment_session(request.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Assessment session not found")
     if session.get("student_id") != current_user.id:
         raise HTTPException(status_code=403, detail="Not your session")
-    if not session.get("study_session_id"):
-        try:
-            study_session = get_or_create_active_study_session(
-                current_user.id,
-                course_id=session.get("course_id"),
-                video_id=session.get("video_id"),
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=403, detail=str(exc))
-    else:
-        study_session = get_or_create_active_study_session(
-            current_user.id,
-            requested_study_session_id=session["study_session_id"],
-        )
-
-    questions = session.get("questions", [])
-
-    # Grade
-    correct_count = 0
-    earned_points = 0
-    total_points = 0
-
-    for q in questions:
-        total_points += q.get("points", 10)
-        submitted_answer = request.answers.get(q["id"])
-        if submitted_answer is not None and submitted_answer == q["correct_answer"]:
-            correct_count += 1
-            earned_points += q.get("points", 10)
-
-    percentage = round((correct_count / max(len(questions), 1)) * 100, 1)
-    xp_earned = int(earned_points * 1.5)
-
-    # FIX (real XP request): this used to be where xp_earned's story
-    # ended — computed, put in the response dict, never written to the
-    # student's row. Now it's actually credited, in real time, to the
-    # authenticated student's Postgres record.
-    xp_result = _apply_xp(current_user, xp_earned, db)
-
-    # FIX (remaining-things request): the "Perfect Quiz" daily challenge
-    # existed in the seed data but nothing anywhere ever completed it —
-    # there was no code path that advanced challenge progress at all.
-    # A 100% score now completes it for real, same day, once.
-    if percentage >= 100:
-        advance_challenge_progress(current_user.id, "quiz", set_to=1)
-
-    # Phase 12 fix: pull score history from the DURABLE results_table
-    # instead of relying solely on AdaptiveEngine's in-memory dict, so
-    # Performance (P) and Trend (T) survive a server restart — directly
-    # addresses CR1/MJ4 from the peer review packet.
-    previous_scores = get_recent_scores_pct(request.student_id, limit=5)
-
-    # Approximate "was this attempt correct" for the Integrity (I)
-    # component's explanation text as "majority correct" — note this does
-    # NOT affect the integrity score itself (response_integrity.py scores
-    # timing alone, per the CR3 fix), only the human-readable reason string.
-    was_correct = percentage >= 50.0
-
-    submitted_at = datetime.utcnow()
-    question_responses = save_question_responses(
-        study_session=study_session,
-        assessment_session=session,
-        answers=request.answers,
-        response_events=request.response_events,
-        submitted_at=submitted_at,
-        total_time_spent=request.time_spent,
+    raise HTTPException(
+        status_code=409,
+        detail="Submit each of the ten assessment questions in sequence via /api/assessment/answer.",
     )
-    timing_values = [
-        r["response_time_seconds"]
-        for r in question_responses
-        if r.get("response_time_seconds") is not None
-    ]
-    crs_time_spent = sum(timing_values) / max(len(timing_values), 1) if timing_values else request.time_spent
-    per_question_limit = session.get("time_limit", 420) / max(len(questions), 1)
-
-    # Run adaptive engine. Server-side condition controls whether MCRF or the
-    # preserved legacy cascade is used.
-    if study_session["condition"] == "LEGACY":
-        adaptive_result = adaptive_engine._determine_difficulty_legacy(
-            student_id=request.student_id,
-            current_score=percentage,
-            attention_score=session.get("attention_score_during_video", 50),
-            time_spent=request.time_spent,
-            time_limit=session.get("time_limit", 420),
-            previous_difficulty=session.get("difficulty", "medium"),
-            previous_scores=previous_scores,
-        )
-    else:
-        adaptive_result = adaptive_engine.determine_difficulty(
-            student_id=request.student_id,
-            current_score=percentage,
-            attention_score=session.get("attention_score_during_video", 50),
-            time_spent=crs_time_spent,
-            time_limit=per_question_limit,
-            previous_difficulty=session.get("difficulty", "medium"),
-            previous_scores=previous_scores,
-            transcript_text=session.get("transcript_text"),
-            was_correct=was_correct,
-        )
-
-    # Generate result message
-    if percentage >= 90:
-        message = "Outstanding! You've truly mastered this material!"
-    elif percentage >= 70:
-        message = "Well done! You have a solid understanding."
-    elif percentage >= 50:
-        message = "Decent effort! Review the video to strengthen weak areas."
-    else:
-        message = "Don't worry! Rewatch the video and try again — you'll improve."
-
-    # Suggested topics based on performance
-    if percentage >= 70:
-        suggested = ["Next: Advanced Topics", "Challenge: Timed Quiz"]
-    else:
-        suggested = [
-            "Review: Rewatch the Video",
-            "Practice: Easier Questions",
-            "Resource: Study Guide",
-        ]
-
-    result = {
-        "session_id": request.session_id,
-        "study_session_id": study_session["study_session_id"],
-        "participant_id": study_session["participant_id"],
-        "condition": study_session["condition"],
-        "student_id": request.student_id,
-        "score": percentage,
-        "total_points": total_points,
-        "earned_points": earned_points,
-        "percentage": percentage,
-        "xp_earned": xp_earned,
-        # Real, persisted values (see _apply_xp above) — not just the
-        # per-assessment delta, but where the student's account actually
-        # landed after this submission.
-        "total_xp": xp_result["new_xp"],
-        "new_level": xp_result["new_level"],
-        "leveled_up": xp_result["leveled_up"],
-        "time_spent": request.time_spent,
-        "correct_answers": correct_count,
-        "total_questions": len(questions),
-        "difficulty": session.get("difficulty", "medium"),
-        "message": message,
-        "next_difficulty": adaptive_result["next_assessment_difficulty"],
-        "suggested_topics": suggested,
-        # Phase 12 addition: needed so get_recent_scores_pct() can order
-        # history correctly across restarts (previously absent entirely).
-        "timestamp": time.time(),
-        "adaptive_response": {
-            "performance_trend": adaptive_result["performance_trend"],
-            "recommended_action": adaptive_result["recommended_action"],
-            "next_assessment_difficulty": adaptive_result["next_assessment_difficulty"],
-            "strength_areas": adaptive_result["strength_areas"],
-            "weak_areas": adaptive_result["weak_areas"],
-            # Phase 11 addition: surfaces the full CRS breakdown to the
-            # frontend (Phase 13 dashboards read this same shape).
-            "crs": adaptive_result.get("crs"),
-        },
-    }
-
-    # Save result (unchanged — durable assessment_results table)
-    save_assessment_result(result)
-
-    # Phase 10: persist the full CRS record as its own durable history
-    # entry, independent of the legacy results_table, so each component
-    # (P, A, I, T, C) has its own queryable time series.
-    crs_block = adaptive_result.get("crs")
-    if crs_block:
-        save_crs_record({
-            "student_id": request.student_id,
-            "study_session_id": study_session["study_session_id"],
-            "participant_id": study_session["participant_id"],
-            "condition": study_session["condition"],
-            "assessment_id": request.session_id,
-            "timestamp": result["timestamp"],
-            "performance": crs_block["components"]["performance"],
-            "behavioral_cue": crs_block["components"]["behavioral_cue"],
-            "integrity": crs_block["components"]["integrity"],
-            "trend": crs_block["components"]["trend"],
-            "complexity": crs_block["components"]["complexity"],
-            "crs": crs_block["score"],
-            "difficulty": adaptive_result["next_assessment_difficulty"],
-            "explanation": crs_block["explanation"],
-        })
-        save_research_crs_decision(
-            study_session=study_session,
-            assessment_session=session,
-            adaptive_result=adaptive_result,
-            previous_scores=previous_scores + [percentage],
-            per_question_responses=question_responses,
-            previous_difficulty=session.get("difficulty", "medium"),
-            attention_score=session.get("attention_score_during_video", 50),
-            transcript_text=session.get("transcript_text"),
-            decision_index=1,
-        )
-    else:
-        save_research_legacy_decision(
-            study_session=study_session,
-            assessment_session=session,
-            adaptive_result=adaptive_result,
-            previous_scores=previous_scores + [percentage],
-            per_question_responses=question_responses,
-            previous_difficulty=session.get("difficulty", "medium"),
-            current_score=percentage,
-            decision_index=1,
-        )
-
-    refresh_behavioral_summary(study_session["study_session_id"])
-    complete_study_session(study_session["study_session_id"], "completed")
-
-    return result
 
 
 @router.get("/session/{session_id}")
 async def get_session(session_id: str, current_user: User = Depends(get_current_user)):
-    """Get assessment session details — only the session's own owner may view it."""
     session = get_assessment_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -675,8 +591,6 @@ async def get_session(session_id: str, current_user: User = Depends(get_current_
 
 @router.get("/results/{student_id}")
 async def get_results_history(student_id: str, current_user: User = Depends(get_current_user)):
-    """Get all assessment results for a student — only your own, for now
-    (no admin/instructor role exists yet to justify viewing others')."""
     if student_id != current_user.id:
         raise HTTPException(status_code=403, detail="You can only view your own results")
     results = get_student_results(student_id)
@@ -684,7 +598,5 @@ async def get_results_history(student_id: str, current_user: User = Depends(get_
         "student_id": student_id,
         "total_assessments": len(results),
         "results": results,
-        "average_score": (
-            sum(r.get("percentage", 0) for r in results) / max(len(results), 1)
-        ),
+        "average_score": sum(result.get("percentage", 0) for result in results) / max(len(results), 1),
     }

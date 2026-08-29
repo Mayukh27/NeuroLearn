@@ -220,6 +220,34 @@ class StudySession(Base):
     camera_revoked = Column(Boolean, default=False)
 
 
+class StudyVideoCompletion(Base):
+    """A video that was actually completed within a study session.
+
+    This is deliberately separate from the course catalogue's mutable
+    ``completed`` flag.  It is the ordered, session-scoped audit trail used
+    to build one assessment from one or more completed videos.
+    """
+    __tablename__ = "study_video_completions"
+    id = Column(String, primary_key=True, default=_uuid)
+    study_session_id = Column(String, ForeignKey("study_sessions.study_session_id"), nullable=False, index=True)
+    participant_id = Column(String, ForeignKey("research_participants.participant_id"), nullable=False, index=True)
+    video_id = Column(String, nullable=False, index=True)
+    completion_order = Column(Integer, nullable=False)
+    completed_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    transcript_text = Column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "study_session_id", "video_id",
+            name="uq_study_video_completion_once",
+        ),
+        UniqueConstraint(
+            "study_session_id", "completion_order",
+            name="uq_study_video_completion_order",
+        ),
+    )
+
+
 class QuestionResponse(Base):
     __tablename__ = "question_responses"
     id = Column(String, primary_key=True, default=_uuid)

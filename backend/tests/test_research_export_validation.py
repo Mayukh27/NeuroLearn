@@ -39,6 +39,7 @@ def _minimal_export(tmp_path: Path):
                 "camera_used": "True", "camera_opted_out": "False", "camera_revoked": "True",
             }
         ],
+        "study_video_completions.csv": [],
         "assessments.csv": [
             {
                 "id": "assess_001", "study_session_id": "study_001",
