@@ -205,6 +205,7 @@ async def api_overview():
             },
             "assessment": {
                 "POST /api/assessment/generate": "Generate adaptive quiz",
+                "POST /api/assessment/answer": "Submit one protocol question response",
                 "POST /api/assessment/submit": "Submit answers + get results",
                 "GET /api/assessment/session/{id}": "Get session details",
                 "GET /api/assessment/results/{student_id}": "Result history",

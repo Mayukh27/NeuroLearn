@@ -17,7 +17,7 @@ Configuration (env vars, all optional — sensible local-dev defaults below):
     PG_PASSWORD    default "neurolearn_dev_pw"  (change this in production!)
 """
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 from loguru import logger
 from dotenv import load_dotenv
@@ -40,6 +40,54 @@ DATABASE_URL = os.getenv(
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 Base = declarative_base()
+
+
+def _ensure_mixed_method_constraints() -> None:
+    """Repair legacy dev databases whose checks predate MIXED sessions."""
+    if engine.dialect.name != "postgresql":
+        return
+
+    inspector = inspect(engine)
+
+    def stale_constraint(table_name: str, constraint_name: str) -> bool:
+        if not inspector.has_table(table_name):
+            return False
+        for constraint in inspector.get_check_constraints(table_name):
+            if constraint["name"] != constraint_name:
+                continue
+            return "MIXED" not in str(constraint.get("sqltext", ""))
+        return False
+
+    stale_study_condition = stale_constraint("study_sessions", "ck_study_sessions_condition")
+    stale_participant_condition = stale_constraint(
+        "research_participants",
+        "ck_research_participants_assigned_condition",
+    )
+    if not stale_study_condition and not stale_participant_condition:
+        return
+
+    with engine.begin() as conn:
+        if stale_study_condition:
+            conn.execute(text(
+                "ALTER TABLE study_sessions "
+                "DROP CONSTRAINT ck_study_sessions_condition"
+            ))
+            conn.execute(text(
+                "ALTER TABLE study_sessions "
+                "ADD CONSTRAINT ck_study_sessions_condition "
+                "CHECK (condition IN ('MCRF', 'LEGACY', 'MIXED'))"
+            ))
+
+        if stale_participant_condition:
+            conn.execute(text(
+                "ALTER TABLE research_participants "
+                "DROP CONSTRAINT ck_research_participants_assigned_condition"
+            ))
+            conn.execute(text(
+                "ALTER TABLE research_participants "
+                "ADD CONSTRAINT ck_research_participants_assigned_condition "
+                "CHECK (assigned_condition IN ('MCRF', 'LEGACY', 'MIXED'))"
+            ))
 
 
 def get_db():
@@ -72,6 +120,7 @@ def init_db():
     """
     from data import models_orm  # noqa: F401 — registers models on Base.metadata
     Base.metadata.create_all(bind=engine)
+    _ensure_mixed_method_constraints()
     logger.success(f"Postgres schema ready at {PG_HOST}:{PG_PORT}/{PG_DB}")
     logger.info(
         "Run `alembic upgrade head` after pulling changes that add/modify "

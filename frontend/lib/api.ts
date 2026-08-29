@@ -210,7 +210,14 @@ async function apiFetch<T>(
       const { AuthError } = await import("./auth")
       throw new AuthError()
     }
-    if (!res.ok) throw new Error(`API ${res.status}: ${res.statusText}`)
+    if (!res.ok) {
+      let detail = res.statusText
+      try {
+        const errorBody = await res.json()
+        detail = errorBody?.detail || errorBody?.message || detail
+      } catch {}
+      throw new Error(`API ${res.status}: ${detail}`)
+    }
     const data = await res.json()
     // Normalize snake_case keys from backend to camelCase for frontend
     return normalizeKeys(data) as T
@@ -496,13 +503,7 @@ export async function completeStudyVideo(
     {
       method: "POST",
       body: JSON.stringify({ transcript_text: transcriptText }),
-    },
-    async () => ({
-      studySessionId,
-      videoId,
-      completionOrder: 1,
-      completedAt: new Date().toISOString(),
-    })
+    }
   )
 }
 
@@ -617,45 +618,6 @@ export async function generateAssessment(
         transcript_text: transcriptText,
         contributing_video_ids: contributingVideoIds,
       }),
-    },
-    async () => {
-      // Local fallback: adaptive difficulty selection
-      await delay(500)
-      let difficulty: "easy" | "medium" | "hard" = "medium"
-      let reason = "Default medium difficulty"
-
-      if (previousScore !== null) {
-        if (previousScore >= 80) { difficulty = "hard"; reason = `Prev score ${previousScore}% → hard` }
-        else if (previousScore < 50) { difficulty = "easy"; reason = `Prev score ${previousScore}% → easy` }
-      }
-      if (attentionScore < 40 && difficulty !== "easy") {
-        difficulty = "easy"
-        reason += ` | Low behavioral_cue (${attentionScore}%) → easy`
-      }
-
-      const fallbackPool = [
-        ...QUESTION_BANK[difficulty],
-        ...Object.entries(QUESTION_BANK)
-          .filter(([level]) => level !== difficulty)
-          .flatMap(([, bank]) => bank),
-      ]
-      const questions = fallbackPool.slice(0, 10).map((question, index) => ({
-        ...question,
-        id: `${question.id}_fallback_${index}`,
-      }))
-      const timeLimits = { easy: 600, medium: 420, hard: 300 }
-
-      return {
-        id: `session_${Date.now()}`,
-        studySessionId: studySessionId || undefined,
-        courseId,
-        videoId,
-        questions,
-        difficulty,
-        timeLimit: timeLimits[difficulty],
-        attentionScoreDuringVideo: attentionScore,
-        adaptiveMetadata: { previousScore, adjustedDifficulty: difficulty, reason },
-      }
     }
   )
 }

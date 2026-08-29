@@ -214,18 +214,32 @@ function VideoContent() {
 
   const goToAssessment = async () => {
     if (isPreparingAssessment) return
+    const currentCompletedVideoId = selectedVideo?.id || (customUrl ? "custom" : null)
+    const currentTranscriptText = typeof window !== "undefined" && (window as any).__transcriptText
+      ? (window as any).__transcriptText()
+      : ""
     setIsPreparingAssessment(true)
     try {
+      if (!studySession?.studySessionId) {
+        throw new Error("Study session is not ready yet.")
+      }
+
+      const transcriptsToPersist = {
+        ...completedVideoTranscripts,
+        ...(currentCompletedVideoId ? { [currentCompletedVideoId]: currentTranscriptText } : {}),
+      }
+      if (Object.keys(transcriptsToPersist).length === 0) {
+        throw new Error("Complete a video before starting the assessment.")
+      }
+
       // The backend derives the assessment context exclusively from these
       // completion records.  Replaying all entries is safe and preserves the
       // original completion order on the server.
-      if (studySession?.studySessionId) {
-        await Promise.all(
-          Object.entries(completedVideoTranscripts).map(([videoId, transcriptText]) =>
-            completeStudyVideo(studySession.studySessionId, videoId, transcriptText)
-          )
+      await Promise.all(
+        Object.entries(transcriptsToPersist).map(([videoId, transcriptText]) =>
+          completeStudyVideo(studySession.studySessionId, videoId, transcriptText)
         )
-      }
+      )
     // Build behavioral_cue summary to thread through to report card
     const attentionSummary = {
       avgScore: Math.round(effectiveBehavioralCue * 10) / 10,
@@ -238,15 +252,15 @@ function VideoContent() {
       avgBlinkRate: behavioralCueGranted === false ? 0 : latestAttention?.modelResponse?.blinkRate ?? 16,
     }
     const params = new URLSearchParams({
-      videos: Object.keys(completedVideoTranscripts).join(","),
+      videos: Object.keys(transcriptsToPersist).join(","),
       course: course?.id || "custom",
       video: selectedVideo?.id || "custom",
-      ...(studySession?.studySessionId ? { studySession: studySession.studySessionId } : {}),
+      studySession: studySession.studySessionId,
       courseTitle: course?.title || "Custom Video",
       videoTitle: selectedVideo?.title || "Video Session",
       behavioral_cue: Math.round(effectiveBehavioralCue).toString(),
       attentionData: JSON.stringify(attentionSummary),
-      transcript: Object.entries(completedVideoTranscripts)
+      transcript: Object.entries(transcriptsToPersist)
         .map(([id, text]) => `[Video ${id}]\n${text}`)
         .join("\n\n"),
     })
