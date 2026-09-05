@@ -506,6 +506,9 @@ export async function completeStudyVideo(
     }
   )
 }
+export async function getActiveStudySession(): Promise<StudySession> {
+  return apiFetch<StudySession>("/research/study-sessions/active")
+}
 
 export interface AssessmentSession {
   id: string

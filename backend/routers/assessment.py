@@ -28,6 +28,7 @@ from data.database import (
     get_recent_scores_pct,
     get_student_results,
     get_assessment_session,
+    record_completed_video,
     refresh_behavioral_summary,
     save_assessment_result,
     save_assessment_session,
@@ -349,7 +350,37 @@ async def generate_assessment(
     completed_context = get_completed_video_context(study_session["study_session_id"])
     contributing_video_ids = completed_context["contributing_video_ids"]
     if not contributing_video_ids:
-        raise HTTPException(status_code=409, detail="Complete at least one video before starting the assessment.")
+        # The frontend completion call (POST .../videos/{id}/complete) may have
+        # been lost due to a stale-closure race, a network hiccup, or a rapid
+        # video switch that replaced the study session before the ENDED event
+        # fired.  Rather than returning 409 and forcing the user to retry,
+        # auto-record the completion for the video that was passed with this
+        # generate request so the pipeline can proceed.
+        #
+        # record_completed_video is idempotent: if the frontend DID manage to
+        # record it concurrently, this is a no-op (the existing row is kept and
+        # optionally enriched with the transcript text if it was previously
+        # empty).
+        if request.video_id:
+            try:
+                record_completed_video(
+                    study_session_id=study_session["study_session_id"],
+                    user_id=current_user.id,
+                    video_id=request.video_id,
+                    transcript_text=request.transcript_text or "",
+                )
+                completed_context = get_completed_video_context(study_session["study_session_id"])
+                contributing_video_ids = completed_context["contributing_video_ids"]
+            except Exception as auto_err:
+                logger.warning(
+                    f"Auto-record completion failed for session "
+                    f"{study_session['study_session_id']} / video {request.video_id}: {auto_err}"
+                )
+        if not contributing_video_ids:
+            raise HTTPException(
+                status_code=409,
+                detail="Complete at least one video before starting the assessment.",
+            )
 
     existing_session = get_canonical_assessment_session_for_study(study_session["study_session_id"])
     if existing_session and existing_session.get("questions"):

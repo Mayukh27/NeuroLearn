@@ -68,6 +68,19 @@ function VideoContent() {
   const [completedVideoTranscripts, setCompletedVideoTranscripts] = useState<Record<string, string>>({})
   const [isPreparingAssessment, setIsPreparingAssessment] = useState(false)
 
+  // FIX: ref always holds the current session ID so handleVideoEnd (a
+  // useCallback) never reads a stale null from its closure snapshot, even
+  // when the video ends in the same render cycle that created the session.
+  const studySessionIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    studySessionIdRef.current = studySession?.studySessionId ?? null
+  }, [studySession?.studySessionId])
+
+  // FIX: track which course already has a session so switching videos on the
+  // same course never starts a second session (the log shows multiple
+  // POST /api/research/study-sessions calls — one per video switch).
+  const sessionCreatedForCourseRef = useRef<string | null>(null)
+
   // Behavioral Cue state
   const [latestAttention, setLatestAttention] = useState<AttentionSnapshotResponse | null>(null)
   const [attentionHistory, setAttentionHistory] = useState<number[]>([])
@@ -125,6 +138,15 @@ function VideoContent() {
       })
       return
     }
+    // FIX: only create ONE session per course load. Previously this effect
+    // depended on selectedVideo?.id, so switching from Video 1 to Video 2
+    // fired startStudySession again — creating a second session. The server
+    // logs confirm this: multiple POST /api/research/study-sessions 200 OK
+    // appear for the same page visit. Each new session has no completions,
+    // so assessment/generate always returns 409.
+    if (sessionCreatedForCourseRef.current === course.id) return
+    sessionCreatedForCourseRef.current = course.id
+
     let cancelled = false
     ;(async () => {
       try {
@@ -132,6 +154,7 @@ function VideoContent() {
         if (!cancelled) setStudySession(session)
       } catch (err) {
         console.error("Failed to start study session:", err)
+        sessionCreatedForCourseRef.current = null  // allow retry on next render
         if (!cancelled) setStudySession(null)
       }
     })()
@@ -162,15 +185,28 @@ function VideoContent() {
         ...prev,
         [completedVideoId]: transcriptText,
       }))
-      // This terminal playback event is the only client path that marks a
-      // video completed.  The same idempotent call is repeated just before
-      // assessment navigation, so a brief session-start race cannot drop it.
-      if (studySession?.studySessionId) {
-        void completeStudyVideo(studySession.studySessionId, completedVideoId, transcriptText)
+      // FIX: read session ID from ref, not from the closure snapshot.
+      // Previously handleVideoEnd depended on studySession?.studySessionId in
+      // its dep array. React creates the callback BEFORE the state update
+      // propagates, so when the video ends during the same render cycle that
+      // the session was set, the captured value can still be null — silently
+      // skipping completeStudyVideo with no error. The ref always holds the
+      // latest value, avoiding this stale-closure race entirely.
+      const sessionId = studySessionIdRef.current
+      if (sessionId) {
+        void completeStudyVideo(sessionId, completedVideoId, transcriptText)
           .catch((err) => console.error("Failed to record completed video:", err))
+      } else {
+        // Session not ready — this should now be rare with the one-session
+        // guard above, but log it if it happens so it's visible.
+        console.warn("[VideoEnd] study session not yet ready; completion will be recovered by the backend auto-record on assessment generation.", completedVideoId)
       }
     }
-  }, [customUrl, selectedVideo?.id, studySession?.studySessionId])
+  // studySession?.studySessionId intentionally removed from dep array —
+  // we use the ref above. Removing it keeps handleVideoEnd stable across
+  // renders so VideoPlayer's YouTube message listener is NOT re-registered
+  // on every session-ID change (which was causing duplicate ENDED handling).
+  }, [customUrl, selectedVideo?.id])
 
   // FIXED: Use functional updates — no stale closure on attentionHistory
   const handleAttentionUpdate = useCallback((snapshot: AttentionSnapshotResponse) => {

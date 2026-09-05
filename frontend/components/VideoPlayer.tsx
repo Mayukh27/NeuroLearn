@@ -150,16 +150,60 @@ export default function VideoPlayer({
     return () => clearInterval(interval)
   }, [videoType, isPlaying, duration, onTimeUpdate])
 
-  // YouTube does not emit native media events to the parent document.  With
-  // enablejsapi=1 it does post its terminal state, which is the completion
-  // signal used by the study flow just like HTMLVideoElement's `ended` event.
+  // ── YouTube IFrame ENDED detection ──
+  //
+  // FIX (Phase 5): YouTube iframes post messages in two distinct formats
+  // depending on the player build and region:
+  //
+  //   Format A (YouTube IFrame API protocol):
+  //     {"event":"onStateChange","info":0}
+  //
+  //   Format B (infoDelivery, sent by some YouTube builds continuously
+  //   and also on terminal state transitions):
+  //     {"event":"infoDelivery","info":{"playerState":0, ...}}
+  //
+  // The previous code only checked Format A, so any YouTube environment
+  // that sends only Format B never triggered onVideoEnd — the completion
+  // callback was never called, no network request appeared in the Network
+  // tab, and study_video_completions remained empty.
+  //
+  // The fix extracts playerState from EITHER format: if it resolves to 0
+  // (YT.PlayerState.ENDED) the video is done and onVideoEnd fires.
+  //
+  // deduplication ref (endedFiredRef): YouTube may send the ENDED state
+  // multiple times (once via onStateChange, once via infoDelivery, or
+  // after a brief "buffering before end" transition). Without the ref,
+  // onVideoEnd would fire twice — persisting the same video twice in
+  // study_video_completions and calling completeStudyVideo twice. The
+  // backend uses idempotent upsert so duplicates are harmless there, but
+  // double-firing at the frontend wastes a request and could confuse
+  // any in-flight state that's not idempotent.
   useEffect(() => {
     if (videoType !== "youtube") return
+
+    let endedFired = false
+
     const onYouTubeMessage = (event: MessageEvent) => {
       try {
         if (!/youtube\.com$|youtube-nocookie\.com$/.test(new URL(event.origin).hostname)) return
         const payload = typeof event.data === "string" ? JSON.parse(event.data) : event.data
-        if (payload?.event === "onStateChange" && payload?.info === 0) {
+
+        // Normalise playerState from either message format.
+        let ytState: number | undefined
+        if (payload?.event === "onStateChange") {
+          // Format A: info is the state integer directly.
+          ytState = typeof payload.info === "number" ? payload.info : undefined
+        } else if (payload?.event === "infoDelivery") {
+          // Format B: state is nested inside the info object.
+          ytState = typeof payload?.info?.playerState === "number"
+            ? payload.info.playerState
+            : undefined
+        }
+
+        if (ytState === 0) {
+          // 0 = YT.PlayerState.ENDED
+          if (endedFired) return   // deduplicate within this listener lifetime
+          endedFired = true
           setIsPlaying(false)
           onPlayStateChange?.(false)
           onVideoEnd?.()

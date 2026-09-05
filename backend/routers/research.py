@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from auth.security import get_current_user
 from data.database import (
     complete_study_session,
+    get_or_create_active_study_session,
     get_or_create_study_session_for_material,
     get_or_create_research_participant,
     get_study_session,
@@ -46,7 +47,19 @@ async def start_study_session(
         video_id=request.video_id,
     )
 
+@router.get("/study-sessions/active")
+async def get_active_study_session(
+    current_user: User = Depends(get_current_user),
+):
+    session = get_or_create_active_study_session(current_user.id)
 
+    if not session:
+        raise HTTPException(
+            status_code=404,
+            detail="No active study session found.",
+        )
+
+    return session
 @router.get("/study-sessions/{study_session_id}")
 async def read_study_session(
     study_session_id: str,

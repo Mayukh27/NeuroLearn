@@ -7,6 +7,7 @@ import { Brain, Clock, Loader2 } from "lucide-react"
 import AssessmentCard from "@/components/AssessmentCard"
 import {
   generateAssessment,
+  getActiveStudySession,
   submitAdaptiveAnswer,
   type AssessmentSession,
   type QuestionResponseEvent,
@@ -29,10 +30,11 @@ export default function AssessmentPage() {
 function AssessmentContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
-  const courseId = searchParams.get("course") || "course_001"
-  const videoId = searchParams.get("video") || "v1"
+  const courseId = searchParams.get("course")
+  const videoId = searchParams.get("video")
   const studySessionId = searchParams.get("studySession")
-  const contributingVideoIds = (searchParams.get("videos") || videoId).split(",").filter(Boolean)
+  const videosParam = searchParams.get("videos")
+  const contributingVideoIds = (videosParam || videoId || "").split(",").filter(Boolean)
   const attentionScore = parseFloat(searchParams.get("behavioral_cue") || "70")
   const prevScore = searchParams.get("prev") ? parseFloat(searchParams.get("prev")!) : null
   const attentionDataParam = searchParams.get("attentionData") || ""
@@ -63,28 +65,52 @@ function AssessmentContent() {
 
   // Generate assessment on mount
   useEffect(() => {
-    async function generate() {
-      setIsLoading(true)
-      try {
-        const sess = await generateAssessment(
-          courseId,
-          videoId,
-          attentionScore,
-          prevScore,
-          getTranscriptText(),
-          studySessionId,
-          contributingVideoIds
-        )
-        setSession(sess)
-        setTimeRemaining(sess.timeLimit)
-      } catch (err) {
-        console.error("Failed to generate assessment:", err)
-      } finally {
-        setIsLoading(false)
+  async function generate() {
+    setIsLoading(true)
+
+    try {
+      let resolvedCourseId = courseId
+      let resolvedVideoId = videoId
+      let resolvedStudySessionId = studySessionId
+      let resolvedVideoIds = contributingVideoIds
+
+      if (!resolvedStudySessionId) {
+        const activeSession = await getActiveStudySession()
+
+        resolvedStudySessionId = activeSession.studySessionId
+        resolvedCourseId = activeSession.courseId || resolvedCourseId
+        resolvedVideoId = activeSession.videoId || resolvedVideoId
+
+        if (!resolvedVideoIds.length && resolvedVideoId) {
+          resolvedVideoIds = [resolvedVideoId]
+        }
       }
+
+      if (!resolvedCourseId || !resolvedVideoId || !resolvedStudySessionId) {
+        throw new Error("No active study session is available for assessment.")
+      }
+
+      const sess = await generateAssessment(
+        resolvedCourseId,
+        resolvedVideoId,
+        attentionScore,
+        prevScore,
+        getTranscriptText(),
+        resolvedStudySessionId,
+        resolvedVideoIds
+      )
+
+      setSession(sess)
+      setTimeRemaining(sess.timeLimit)
+    } catch (err) {
+      console.error("Failed to generate assessment:", err)
+    } finally {
+      setIsLoading(false)
     }
-    generate()
-  }, [courseId, videoId, attentionScore, prevScore])
+  }
+
+  generate()
+}, [courseId, videoId, studySessionId, videosParam, attentionScore, prevScore])
 
   useEffect(() => {
     const question = session?.questions[currentIdx]
