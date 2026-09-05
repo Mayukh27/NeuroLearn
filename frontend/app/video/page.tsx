@@ -460,6 +460,7 @@ function VideoContent() {
           />
           <TranscriptionPanel
             videoId={selectedVideo?.id || "custom"}
+            videoUrl={effectiveUrl}
             currentTime={currentTime}
             isPlaying={isPlaying}
           />

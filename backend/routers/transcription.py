@@ -16,29 +16,39 @@ router = APIRouter(prefix="/api/transcription", tags=["Transcription"])
 
 
 @router.get("/{video_id}", response_model=list[TranscriptSegment])
-async def get_full_transcript(video_id: str):
-    """
-    Get the complete transcript for a video.
-
-    Returns all segments with word-level timestamps.
-    In production, this would be pre-computed and cached.
-    """
-    return transcription_service.get_full_transcript(video_id)
-
+async def get_full_transcript(
+    video_id: str,
+    video_url: str = Query(...),
+):
+    return transcription_service.get_full_transcript(
+        video_id,
+        video_url=video_url,
+    )
 
 @router.get("/{video_id}/live")
-async def get_live_segment(video_id: str, current_time: float = Query(0.0)):
+async def get_live_segment(
+    video_id: str,
+    current_time: float = Query(0.0),
+    video_url: str = Query(...),
+):
     """
     Get the transcript segment at a specific video timestamp.
     Used for live sync — frontend polls this as video plays.
-
-    Query params:
-        current_time: Current video playback time in seconds
     """
-    segment = transcription_service.get_segment_at_time(current_time)
+    segment = transcription_service.get_segment_at_time(
+        current_time,
+        video_url=video_url,
+    )
+
     if segment:
         return segment
-    return {"id": None, "text": "", "timestamp": "", "message": "No segment at this timestamp"}
+
+    return {
+        "id": None,
+        "text": "",
+        "timestamp": "",
+        "message": "No segment at this timestamp",
+    }
 
 
 @router.post("/chunk")

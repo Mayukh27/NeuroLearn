@@ -441,13 +441,14 @@ export async function fetchTranscription(videoId: string): Promise<TranscriptSeg
   )
 }
 
-/** GET /api/transcription/:videoId/live?current_time=X — Segment at timestamp */
+/** GET /api/transcription/:videoId/live?current_time=X&video_url=Y — Segment at timestamp */
 export async function fetchLiveTranscriptSegment(
   videoId: string,
-  currentTime: number
+  currentTime: number,
+  videoUrl: string
 ): Promise<TranscriptSegment | null> {
   return apiFetch<TranscriptSegment | null>(
-    `/transcription/${videoId}/live?current_time=${currentTime}`,
+    `/transcription/${videoId}/live?current_time=${currentTime}&video_url=${encodeURIComponent(videoUrl)}`,
     { method: "GET" },
     async () => {
       const seg = DUMMY_TRANSCRIPT_SEGMENTS.find(

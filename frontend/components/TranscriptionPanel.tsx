@@ -21,6 +21,7 @@ interface TranscriptSegment {
 
 interface TranscriptionPanelProps {
   videoId: string
+  videoUrl: string
   currentTime: number
   isPlaying: boolean
 }
@@ -41,6 +42,7 @@ const DUMMY_SEGMENTS: TranscriptSegment[] = [
 
 export default function TranscriptionPanel({
   videoId,
+  videoUrl,
   currentTime,
   isPlaying,
 }: TranscriptionPanelProps) {
@@ -55,7 +57,7 @@ export default function TranscriptionPanel({
   useEffect(() => {
     async function fetchFullTranscript() {
       try {
-        const res = await fetch(`${API_BASE}/transcription/${videoId}`)
+        const res = await fetch( `${API_BASE}/transcription/${videoId}?video_url=${encodeURIComponent(videoUrl)}` )
         if (res.ok) {
           const data = await res.json()
           setSegments(data)
@@ -68,7 +70,7 @@ export default function TranscriptionPanel({
       setIsConnected(false)
     }
     fetchFullTranscript()
-  }, [videoId])
+  }, [videoId, videoUrl])
 
   // ── Poll live segment as video plays ──
   useEffect(() => {
@@ -90,24 +92,26 @@ export default function TranscriptionPanel({
 
     // Also try fetching live from backend (to get new segments)
     async function fetchLive() {
-      try {
-        const res = await fetch(
-          `${API_BASE}/transcription/${videoId}/live?current_time=${currentTime}`
+  try {
+    const res = await fetch(
+      `${API_BASE}/transcription/${videoId}/live?current_time=${currentTime}&video_url=${encodeURIComponent(videoUrl)}`
+    )
+    if (res.ok) {
+      const data = await res.json()
+      if (data.id && !segments.find((s) => s.id === data.id)) {
+        setSegments((prev) =>
+          [...prev, data].sort((a, b) => a.start_time - b.start_time)
         )
-        if (res.ok) {
-          const data = await res.json()
-          if (data.id && !segments.find((s) => s.id === data.id)) {
-            setSegments((prev) => [...prev, data].sort((a, b) => a.start_time - b.start_time))
-          }
-          setIsConnected(true)
-        }
-      } catch {
-        setIsConnected(false)
       }
+      setIsConnected(true)
     }
+  } catch {
+    setIsConnected(false)
+  }
+}
 
     fetchLive()
-  }, [currentTime, isPlaying, videoId, segments])
+  }, [currentTime, isPlaying, videoId, videoUrl, segments])
 
   // ── Auto-scroll to active segment ──
   useEffect(() => {
