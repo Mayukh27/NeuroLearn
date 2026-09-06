@@ -8,10 +8,21 @@ import AssessmentCard from "@/components/AssessmentCard"
 import {
   generateAssessment,
   getActiveStudySession,
+  getAssessmentSession,
   submitAdaptiveAnswer,
+  submitAssessment,
   type AssessmentSession,
   type QuestionResponseEvent,
 } from "@/lib/api"
+
+// FIX (perf/timeout request, item 1): the next question's FLAN-T5
+// generation now happens in a backend background task instead of blocking
+// the /answer response, so a "pending" round needs a short poll instead of
+// arriving inline. Interval and timeout are generous relative to a single
+// FLAN-T5 forward pass, but bounded so a stuck generation still surfaces
+// an error instead of spinning forever.
+const NEXT_QUESTION_POLL_INTERVAL_MS = 700
+const NEXT_QUESTION_POLL_TIMEOUT_MS = 30000
 
 const TOTAL_ASSESSMENT_QUESTIONS = 10
 
@@ -51,6 +62,10 @@ function AssessmentContent() {
   const [timeRemaining, setTimeRemaining] = useState(0)
   const [startTime] = useState(Date.now())
   const timerRef = useRef<NodeJS.Timeout | undefined>(undefined)
+  // FIX (perf/timeout request, item 9): guards against finalizing twice —
+  // e.g. the timer firing auto-submit at nearly the same moment the
+  // in-flight 10th answer already completed the assessment.
+  const hasFinalizedRef = useRef(false)
   const questionPresentedAtRef = useRef<Record<string, number>>({})
   const responseEventsRef = useRef<QuestionResponseEvent[]>([])
 
@@ -135,14 +150,69 @@ function AssessmentContent() {
     return () => clearInterval(timerRef.current)
   }, [session])
 
+  // FIX (perf/timeout request, item 3): timer expiry now actually finalizes
+  // the assessment (it previously did nothing at all — see handleAnswer's
+  // completion branch below for the reused navigation logic). Whatever was
+  // graded via submitAdaptiveAnswer so far counts; anything unanswered is
+  // scored as incorrect by the backend's timeout path.
   const handleAutoSubmit = useCallback(async () => {
-    if (!session) return
-    const question = session.questions[currentIdx]
-    if (question && answers[question.id] !== undefined) return
-  }, [session, answers])
+    if (!session || hasFinalizedRef.current) return
+    hasFinalizedRef.current = true
+    setIsSubmitting(true)
+    try {
+      const result = await submitAssessment(
+        session.id,
+        answers,
+        session.questions,
+        Math.round((Date.now() - startTime) / 1000),
+        responseEventsRef.current
+      )
+      const resultPayload = {
+        data: JSON.stringify(result),
+        behavioral_cue: attentionDataParam,
+        course: courseTitleParam,
+        video: videoTitleParam,
+      }
+      if (session.studySessionId || studySessionId) {
+        window.sessionStorage.setItem("neurolearn_last_result", JSON.stringify(resultPayload))
+      }
+      const params = new URLSearchParams({
+        data: JSON.stringify(result),
+        behavioral_cue: attentionDataParam,
+        course: courseTitleParam,
+        video: videoTitleParam,
+      })
+      router.push(`/results?${params.toString()}`)
+    } catch (err) {
+      console.error("Timeout auto-submit failed:", err)
+      hasFinalizedRef.current = false
+      setIsSubmitting(false)
+    }
+  }, [session, answers, startTime, attentionDataParam, courseTitleParam, videoTitleParam, studySessionId, router])
+
+  // FIX (perf/timeout request, item 1): generation of the next question now
+  // happens in a backend background task, so a "pending" round polls
+  // GET /assessment/session/{id} until the question shows up (or times out)
+  // instead of expecting it inline in the /answer response.
+  const waitForNextQuestion = async (
+    sessionId: string,
+    expectedQuestionCount: number
+  ): Promise<AssessmentSession> => {
+    const deadline = Date.now() + NEXT_QUESTION_POLL_TIMEOUT_MS
+    // First check without delay — the background task may already be done.
+    let latest = await getAssessmentSession(sessionId)
+    while (latest.questions.length < expectedQuestionCount) {
+      if (Date.now() >= deadline) {
+        throw new Error("Timed out waiting for the next question to generate.")
+      }
+      await new Promise((resolve) => setTimeout(resolve, NEXT_QUESTION_POLL_INTERVAL_MS))
+      latest = await getAssessmentSession(sessionId)
+    }
+    return latest
+  }
 
   const handleAnswer = async (questionId: string, answer: string | number) => {
-    if (!session || isSubmitting || isAdvancing) return
+    if (!session || isSubmitting || isAdvancing || hasFinalizedRef.current) return
     const presentedAt = questionPresentedAtRef.current[questionId] || Date.now()
     const submittedAt = Date.now()
     const responseEvent: QuestionResponseEvent = {
@@ -169,6 +239,8 @@ function AssessmentContent() {
     try {
       const round = await submitAdaptiveAnswer(session.id, questionId, answer, responseEvent)
       if (round.completed && round.result) {
+        if (hasFinalizedRef.current) return // timer already finalized this session
+        hasFinalizedRef.current = true
         const resultPayload = {
           data: JSON.stringify(round.result),
           behavioral_cue: attentionDataParam,
@@ -187,7 +259,13 @@ function AssessmentContent() {
         router.push(`/results?${params.toString()}`)
         return
       }
-      setSession(round.session)
+      // FIX (perf/timeout request, item 1): the next question is generated
+      // in the background now, so wait for it to show up instead of
+      // expecting it inline in `round.session`.
+      const readySession = round.nextQuestionPending
+        ? await waitForNextQuestion(session.id, currentIdx + 2)
+        : round.session
+      setSession(readySession)
       setCurrentIdx((i) => i + 1)
     } catch (err) {
       console.error("Adaptive answer failed:", err)

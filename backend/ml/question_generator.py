@@ -1,4 +1,3 @@
-
 import os
 import re
 import json
@@ -186,12 +185,9 @@ class QuestionGenerator:
         """
         # Try FLAN-T5 first
         if self.model is not None and self.tokenizer is not None:
-            try:
-                return self._generate_with_flan(
-                    transcript_text, difficulty, num_questions, topic_id
-                )
-            except Exception as e:
-                logger.error(f"FLAN-T5 generation failed: {e}")
+            return self._generate_with_flan(
+                transcript_text, difficulty, num_questions, topic_id
+            )
 
         # Fallback to question bank
         return self._generate_from_bank(difficulty, num_questions, topic_id)
@@ -236,33 +232,48 @@ class QuestionGenerator:
             prompt = (
                 f"Generate a {difficulty} multiple choice question "
                 f"with 4 options based on the following text. "
-                f"Format: Question: [question]\\nA) [option1]\\nB) [option2]\\n"
-                f"C) [option3]\\nD) [option4]\\nCorrect: [A/B/C/D]\\n"
-                f"Explanation: [why]\\n\\n"
+                f"Format: Question: [question]\nA) [option1]\nB) [option2]\n"
+                f"C) [option3]\nD) [option4]\nCorrect: [A/B/C/D]\n"
+                f"Explanation: [why]\n\n"
                 f"Text: {segment}"
             )
 
-            # Tokenize
-            inputs = self.tokenizer(
-                prompt, return_tensors="pt", max_length=512, truncation=True
-            )
-
-            # Generate
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=256,
-                    num_beams=4,
-                    temperature=0.7,
-                    do_sample=True,
-                    top_p=0.9,
+            # FIX: generation is now isolated per segment/iteration. A
+            # failure on one segment (tokenize/generate/decode) no longer
+            # aborts the whole batch and discards questions already
+            # produced for other segments — it just falls through to bank
+            # padding for this one slot, same as a parse failure would.
+            try:
+                # Tokenize
+                inputs = self.tokenizer(
+                    prompt, return_tensors="pt", max_length=512, truncation=True
                 )
 
-            generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            logger.info(f"FLAN RAW OUTPUT: {generated_text}")
+                # Generate
+                with torch.no_grad():
+                    outputs = self.model.generate(
+                        **inputs,
+                        max_new_tokens=256,
+                        num_beams=4,
+                        temperature=0.7,
+                        do_sample=True,
+                        top_p=0.9,
+                    )
 
-            # Parse generated text
-            parsed = self._parse_generated_question(generated_text)
+                generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                logger.info(f"FLAN RAW OUTPUT: {generated_text}")
+
+                # Parse generated text
+                parsed = self._parse_generated_question(generated_text)
+            except Exception:
+                # FIX: log the actual traceback so a silent per-segment
+                # failure is visible in the terminal instead of just
+                # showing up later as an unexplained bank-fallback question.
+                logger.exception(
+                    f"FLAN-T5 generation failed for segment {i} (difficulty={difficulty})"
+                )
+                parsed = None
+
             if parsed:
                 blooms = random.choice(blooms_map.get(difficulty, ["understand"]))
                 questions.append({
@@ -303,12 +314,16 @@ class QuestionGenerator:
 
         return questions[:num_questions]
 
+    # FIX (perf/timeout request, item 7): accepts "A)", "(A)", and "[A]"
+    # option-letter formats. Group 1 always captures the bare letter.
+    _OPTION_LINE_RE = re.compile(r"^\(?\[?([A-D])[\)\]]\s*", re.IGNORECASE)
+
     def _parse_generated_question(self, text: str) -> Optional[dict]:
         """Parse FLAN-T5 output into structured question."""
         try:
             lines = text.strip().split("\n")
             question = ""
-            options = []
+            options: list[str] = []
             correct = 0
             explanation = ""
 
@@ -316,24 +331,53 @@ class QuestionGenerator:
                 line = line.strip()
                 if line.lower().startswith("question:"):
                     question = line.split(":", 1)[1].strip()
-                elif re.match(r"^[A-D]\)", line):
-                    options.append(line[2:].strip())
-                elif line.lower().startswith("correct:"):
+                    continue
+                if line.lower().startswith("correct:"):
                     letter = line.split(":", 1)[1].strip().upper()
-                    correct = {"A": 0, "B": 1, "C": 2, "D": 3}.get(letter, 0)
-                elif line.lower().startswith("explanation:"):
+                    # Correct: may itself arrive as "(A)" / "[A]" / "A".
+                    letter_match = re.search(r"[A-D]", letter)
+                    if letter_match:
+                        correct = {"A": 0, "B": 1, "C": 2, "D": 3}[letter_match.group(0)]
+                    continue
+                if line.lower().startswith("explanation:"):
                     explanation = line.split(":", 1)[1].strip()
+                    continue
+                option_match = self._OPTION_LINE_RE.match(line)
+                if option_match:
+                    options.append(line[option_match.end():].strip())
 
-            if question and len(options) >= 2:
-                # Pad options to 4 if needed
-                while len(options) < 4:
-                    options.append("None of the above")
-                return {
-                    "question": question,
-                    "options": options[:4],
-                    "correct_answer": min(correct, len(options) - 1),
-                    "explanation": explanation or "Review the material for more details.",
-                }
+            # FIX (item 7): de-duplicate options case/whitespace-insensitively
+            # while preserving first-seen order and original casing, so a
+            # model repeating an option doesn't silently pass validation as
+            # if it were a distinct choice.
+            seen: set[str] = set()
+            unique_options: list[str] = []
+            for option in options:
+                key = re.sub(r"\s+", " ", option.strip().casefold())
+                if key and key not in seen:
+                    seen.add(key)
+                    unique_options.append(option)
+
+            if not question or len(unique_options) < 2:
+                return None
+
+            # Pad to exactly 4 with distinct, clearly-synthetic fillers —
+            # never a duplicate of a real option or of each other.
+            filler_index = 1
+            while len(unique_options) < 4:
+                filler = f"None of the above ({filler_index})"
+                if re.sub(r"\s+", " ", filler.casefold()) not in seen:
+                    unique_options.append(filler)
+                    seen.add(re.sub(r"\s+", " ", filler.casefold()))
+                filler_index += 1
+
+            unique_options = unique_options[:4]
+            return {
+                "question": question,
+                "options": unique_options,
+                "correct_answer": min(correct, len(unique_options) - 1),
+                "explanation": explanation or "Review the material for more details.",
+            }
         except Exception as e:
             logger.warning(f"Failed to parse question: {e}")
 

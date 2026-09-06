@@ -1,9 +1,14 @@
 """Assessment orchestration for the fixed mixed-method research protocol.
 
-One study session produces one 10-item assessment: MCRF chooses the
-difficulties for questions 1--5, then LEGACY chooses questions 6--10.  The
-engines themselves remain in :mod:`ml.adaptive_engine`; this router owns only
-their protocol, evidence flow, and durable study logging.
+One study session produces one 10-item assessment: a single MCRF decision
+(from the learner's MCRF/CRS state for the completed study session as a
+whole) sets ONE difficulty for all of questions 1--5; a single LEGACY
+decision, made once at the Q5->Q6 boundary, sets ONE difficulty for all of
+questions 6--10. This is protocol-level, not item-level, adaptivity: a
+question's correctness, response time, or outcome is used only for scoring
+and never changes the difficulty of the question after it. The engines
+themselves remain in :mod:`ml.adaptive_engine`; this router owns only their
+protocol, evidence flow, and durable study logging.
 """
 
 from __future__ import annotations
@@ -13,8 +18,10 @@ import time
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from loguru import logger
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from auth.security import get_current_user
 from data.database import (
@@ -107,6 +114,87 @@ def _generate_unique_question(
         status_code=503,
         detail="Could not generate a unique question for this assessment. Please retry later.",
     )
+
+
+async def _generate_and_store_question_block(
+    *,
+    session_id: str,
+    transcript_text: str,
+    difficulty: str,
+    topic_id: str,
+    method: str,
+    start_index: int,
+    count: int,
+) -> None:
+    """Generate and persist a whole block of questions at one, already-fixed
+    difficulty (protocol correction: difficulty is decided once per block —
+    MCRF for Q1-5, LEGACY for Q6-10 — never recomputed from the previous
+    question's correctness/timing). Runs after the triggering response has
+    already been sent, so FLAN-T5 generation never blocks grading/persisting
+    an answer or the client-side timer.
+    """
+    current = get_assessment_session(session_id)
+    if not current:
+        return
+    existing_questions = list(current.get("questions") or [])
+    have_indices = {q.get("decision_index") for q in existing_questions}
+    generated: list[dict] = []
+    for offset in range(count):
+        index = start_index + offset
+        if (index + 1) in have_indices:
+            continue  # already generated (e.g. a retried trigger)
+        try:
+            # run_in_threadpool: _generate_unique_question is a blocking,
+            # CPU-bound call (tokenize + FLAN-T5 forward pass); running it
+            # off the event loop keeps other requests (e.g. session
+            # polling) responsive while it runs.
+            question = await run_in_threadpool(
+                _generate_unique_question,
+                transcript_text=transcript_text,
+                difficulty=difficulty,
+                topic_id=topic_id,
+                existing_questions=existing_questions + generated,
+                method=method,
+                question_index=index,
+            )
+        except Exception:
+            logger.exception(
+                f"Background question generation failed for session {session_id}, "
+                f"question_index={index}; falling back to question bank."
+            )
+            try:
+                bank_questions = question_generator._generate_from_bank(difficulty, 1, topic_id)
+            except Exception:
+                logger.exception(f"Question-bank fallback also failed for session {session_id}")
+                continue
+            if not bank_questions:
+                continue
+            question = dict(bank_questions[0])
+            question["adaptive_method"] = method
+            question["decision_index"] = index + 1
+        generated.append(question)
+
+    if not generated:
+        return
+
+    # Re-read so we merge onto the latest questions list rather than one
+    # captured before other concurrent writes landed.
+    current = get_assessment_session(session_id)
+    if not current:
+        return
+    latest_questions = list(current.get("questions") or [])
+    have_indices = {q.get("decision_index") for q in latest_questions}
+    to_add = [q for q in generated if q.get("decision_index") not in have_indices]
+    if not to_add:
+        return
+    latest_questions.extend(to_add)
+    latest_questions.sort(key=lambda q: q.get("decision_index", 0))
+    update_assessment_adaptive_state(
+        session_id,
+        questions=latest_questions,
+        completion_status="started",
+    )
+    save_generated_questions({**current, "questions": to_add})
 
 
 def _assessment_score(responses: list[dict]) -> float:
@@ -252,6 +340,41 @@ def _record_decision(
     )
 
 
+def _record_block_decision(
+    *,
+    method: str,
+    study_session: dict,
+    assessment_session: dict,
+    adaptive_result: dict,
+    previous_scores: list[float],
+    responses: list[dict],
+    previous_difficulty: str | None,
+    block_start_index: int,
+    block_size: int,
+) -> None:
+    """Protocol correction: difficulty is decided ONCE per block (MCRF for
+    Q1-5, LEGACY for Q6-10) before that block's questions are generated —
+    never recomputed per question from the previous answer's correctness or
+    timing. `adaptive_result`/`previous_scores`/`responses` are therefore
+    the single, frozen inputs for the whole block; we still write one
+    research decision record per question (decision_index block_start_index+1
+    .. +block_size) so the existing CRS/LEGACY export shape (one row per
+    question) is unchanged — every record in the block just carries the
+    same already-determined difficulty instead of a re-evaluated one.
+    """
+    for offset in range(block_size):
+        _record_decision(
+            method=method,
+            study_session=study_session,
+            assessment_session=assessment_session,
+            adaptive_result=adaptive_result,
+            previous_scores=previous_scores,
+            responses=responses,
+            previous_difficulty=previous_difficulty,
+            decision_index=block_start_index + offset + 1,
+        )
+
+
 def _result_message(percentage: float) -> tuple[str, list[str]]:
     if percentage >= 90:
         return "Outstanding! You've truly mastered this material!", ["Next: Advanced Topics", "Challenge: Timed Quiz"]
@@ -269,10 +392,20 @@ def _finalize_assessment(
     state: dict,
     current_user: User,
     db: Session,
+    allow_partial: bool = False,
 ) -> dict:
     questions = session.get("questions", [])
     answers = state.get("answers", {})
-    if len(questions) != TOTAL_QUESTIONS or len(answers) != TOTAL_QUESTIONS:
+    # FIX (item 3, timeout auto-submit): the normal 10/10 completion path
+    # (allow_partial=False, unchanged) still requires all ten protocol
+    # questions to be answered — that behavior is untouched. allow_partial
+    # is only used by the new /submit timeout path below, for the case
+    # where the timer expired before the tenth question was reached; any
+    # question the student never got to answer scores 0 rather than
+    # blocking finalization. No MCRF/LEGACY/CRS records are written here
+    # either way — those are only ever recorded per-question, at answer
+    # time, exactly as before.
+    if not allow_partial and (len(questions) != TOTAL_QUESTIONS or len(answers) != TOTAL_QUESTIONS):
         raise RuntimeError("Cannot complete an assessment before all ten protocol questions are answered")
     correct_count = sum(answers.get(question["id"]) == question.get("correct_answer") for question in questions)
     total_points = sum(int(question.get("points", 10)) for question in questions)
@@ -312,6 +445,10 @@ def _finalize_assessment(
         "next_difficulty": last_adaptive["next_assessment_difficulty"],
         "suggested_topics": suggested_topics,
         "timestamp": time.time(),
+        # FIX (item 3): lets the frontend/results page and research export
+        # distinguish a genuine timeout finalize from a full 10/10 finish.
+        "timed_out": allow_partial and len(answers) < TOTAL_QUESTIONS,
+        "answered_count": len(answers),
         "adaptive_response": {
             "performance_trend": last_adaptive["performance_trend"],
             "recommended_action": last_adaptive["recommended_action"],
@@ -326,13 +463,27 @@ def _finalize_assessment(
     }
     save_assessment_result(result)
     refresh_behavioral_summary(study_session["study_session_id"])
+    # FIX (items 8/9): complete_study_session is unchanged and still called
+    # exactly once, right here, only once all ten questions are answered or
+    # a genuine timeout finalize has happened (allow_partial path) — never
+    # when the assessment starts or a video ends.
     complete_study_session(study_session["study_session_id"], "completed")
+    # FIX (item 9): stash the final result on the session's adaptive_state so
+    # a retried/duplicate finalize call (e.g. a race between the 10th
+    # /answer and a near-simultaneous timeout /submit) can return the same
+    # result idempotently instead of erroring or re-finalizing.
+    update_assessment_adaptive_state(
+        session["id"],
+        adaptive_state={**state, "final_result": result},
+        completion_status="completed",
+    )
     return result
 
 
 @router.post("/generate", response_model=AssessmentSession)
 async def generate_assessment(
     request: GenerateAssessmentRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
 ):
     """Start or resume the single 10-question mixed-method assessment."""
@@ -386,8 +537,10 @@ async def generate_assessment(
     if existing_session and existing_session.get("questions"):
         return existing_session
 
-    # The server-recorded completion rows, not client query parameters, are
-    # the sole source of contributing videos and transcript context.
+    # Protocol correction: MCRF is evaluated ONCE per assessment, from the
+    # learner's MCRF/CRS state for the completed study session as a whole —
+    # not re-evaluated per question. This single value governs all of
+    # Q1-Q5; it is never recomputed from in-assessment answer correctness.
     transcript_text = completed_context["transcript_text"]
     attention_score = get_completed_video_behavioral_score(study_session["study_session_id"])
     durable_scores = get_recent_scores_pct(current_user.id, limit=5)
@@ -403,10 +556,14 @@ async def generate_assessment(
         durable_scores=durable_scores,
         responses=[],
     )
-    initial_difficulty = initial["difficulty"]
+    mcrf_difficulty = initial["difficulty"]
+    # Q1 is generated synchronously so there is something to show
+    # immediately; Q2-Q5 use the identical mcrf_difficulty and are generated
+    # in the background right away (their content never depends on how Q1
+    # is answered), so answering never has to wait on FLAN-T5 for them.
     question = _generate_unique_question(
         transcript_text=transcript_text,
-        difficulty=initial_difficulty,
+        difficulty=mcrf_difficulty,
         topic_id=request.course_id,
         existing_questions=[],
         method="MCRF",
@@ -422,7 +579,7 @@ async def generate_assessment(
         "video_id": contributing_video_ids[-1],
         "contributing_video_ids": contributing_video_ids,
         "questions": [question],
-        "difficulty": initial_difficulty,
+        "difficulty": mcrf_difficulty,
         "time_limit": TIME_LIMIT_SECONDS,
         "attention_score_during_video": attention_score,
         "adaptive_metadata": adaptive_metadata,
@@ -435,10 +592,15 @@ async def generate_assessment(
             "answers": {},
             "responses": [],
             "adaptive_metadata": adaptive_metadata,
+            # Frozen, assessment-level block difficulties (item: no
+            # per-question adaptivity). mcrf_block covers Q1-5;
+            # legacy_block is filled in once, at the Q5->Q6 boundary.
+            "mcrf_block_difficulty": mcrf_difficulty,
+            "legacy_block_difficulty": None,
             "last_adaptive_response": {
                 "performance_trend": "stable",
                 "recommended_action": adaptive_metadata["reason"],
-                "next_assessment_difficulty": initial_difficulty,
+                "next_assessment_difficulty": mcrf_difficulty,
                 "strength_areas": [],
                 "weak_areas": [],
                 "crs": initial.get("crs"),
@@ -447,7 +609,10 @@ async def generate_assessment(
     }
     save_assessment_session(session)
     save_generated_questions(session)
-    _record_decision(
+    # One research decision record per question (unchanged export shape),
+    # but every one of Q1-Q5's records carries this same, single MCRF
+    # decision — none are re-evaluated from answer correctness.
+    _record_block_decision(
         method="MCRF",
         study_session=study_session,
         assessment_session=session,
@@ -455,7 +620,18 @@ async def generate_assessment(
         previous_scores=durable_scores,
         responses=[],
         previous_difficulty=None,
-        decision_index=1,
+        block_start_index=0,
+        block_size=MCRF_QUESTION_COUNT,
+    )
+    background_tasks.add_task(
+        _generate_and_store_question_block,
+        session_id=session["id"],
+        transcript_text=transcript_text,
+        difficulty=mcrf_difficulty,
+        topic_id=request.course_id,
+        method="MCRF",
+        start_index=1,
+        count=MCRF_QUESTION_COUNT - 1,
     )
     return session
 
@@ -463,6 +639,7 @@ async def generate_assessment(
 @router.post("/answer")
 async def submit_adaptive_answer(
     request: SubmitAdaptiveAnswerRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -530,46 +707,68 @@ async def submit_adaptive_answer(
 
     next_index = answered_count
     next_method = _method_for_question(next_index)
-    durable_scores = get_recent_scores_pct(current_user.id, limit=5)
-    adaptive_result = _decision_for_question(
-        question_index=next_index,
-        student_id=current_user.id,
-        session={**session, "questions": questions},
-        durable_scores=durable_scores,
-        responses=responses,
-    )
-    next_difficulty = adaptive_result.get("difficulty", adaptive_result.get("next_assessment_difficulty"))
-    next_question = _generate_unique_question(
-        transcript_text=session.get("transcript_text") or "",
-        difficulty=next_difficulty,
-        topic_id=session.get("course_id") or "course_001",
-        existing_questions=questions,
-        method=next_method,
-        question_index=next_index,
-    )
-    questions.append(next_question)
-    evidence_responses = _responses_for_method(responses, next_method) or responses
-    performance_history = (durable_scores + [
-        _assessment_score(evidence_responses[:index + 1])
-        for index in range(len(evidence_responses))
-    ])[-5:]
-    _record_decision(
-        method=next_method,
-        study_session=study_session,
-        assessment_session={**session, "questions": questions},
-        adaptive_result=adaptive_result,
-        previous_scores=performance_history,
-        responses=evidence_responses,
-        previous_difficulty=question.get("difficulty"),
-        decision_index=next_index + 1,
-    )
+
+    # ── Protocol correction ──────────────────────────────────────────────
+    # Difficulty is NOT re-evaluated per question. Q1-Q5 all use the single
+    # MCRF decision made at assessment creation; Q6-Q10 all use a single
+    # LEGACY decision made once, right here, the first time we cross into
+    # the LEGACY block (i.e. immediately after Q5 is answered) — using the
+    # learner's MCRF/CRS-derived state for the study session as a whole,
+    # exactly as before at this same boundary. Once set, that LEGACY value
+    # is frozen for Q7-Q10 too: no subsequent answer inside either block
+    # changes the difficulty of the question after it.
+    if next_index < MCRF_QUESTION_COUNT:
+        next_difficulty = state.get("mcrf_block_difficulty") or session.get("difficulty", "medium")
+        crs_for_response = (state.get("last_adaptive_response") or {}).get("crs")
+    elif next_index == MCRF_QUESTION_COUNT:
+        # One-time LEGACY block decision, computed from Q1-Q5 evidence as a
+        # whole (unchanged engine call/inputs — just invoked once here
+        # instead of on every subsequent LEGACY-block answer).
+        durable_scores = get_recent_scores_pct(current_user.id, limit=5)
+        legacy_decision = _decision_for_question(
+            question_index=next_index,
+            student_id=current_user.id,
+            session={**session, "questions": questions},
+            durable_scores=durable_scores,
+            responses=responses,
+        )
+        next_difficulty = legacy_decision.get("difficulty", legacy_decision.get("next_assessment_difficulty"))
+        evidence_responses = _responses_for_method(responses, next_method) or responses
+        performance_history = (durable_scores + [
+            _assessment_score(evidence_responses[:index + 1])
+            for index in range(len(evidence_responses))
+        ])[-5:]
+        _record_block_decision(
+            method="LEGACY",
+            study_session=study_session,
+            assessment_session={**session, "questions": questions},
+            adaptive_result=legacy_decision,
+            previous_scores=performance_history,
+            responses=evidence_responses,
+            previous_difficulty=question.get("difficulty"),
+            block_start_index=MCRF_QUESTION_COUNT,
+            block_size=TOTAL_QUESTIONS - MCRF_QUESTION_COUNT,
+        )
+        state = {**state, "legacy_block_difficulty": next_difficulty}
+        crs_for_response = legacy_decision.get("crs")
+        background_tasks.add_task(
+            _generate_and_store_question_block,
+            session_id=session["id"],
+            transcript_text=session.get("transcript_text") or "",
+            difficulty=next_difficulty,
+            topic_id=session.get("course_id") or "course_001",
+            method="LEGACY",
+            start_index=MCRF_QUESTION_COUNT,
+            count=TOTAL_QUESTIONS - MCRF_QUESTION_COUNT,
+        )
+    else:
+        next_difficulty = state.get("legacy_block_difficulty") or session.get("difficulty", "medium")
+        crs_for_response = (state.get("last_adaptive_response") or {}).get("crs")
+
     last_adaptive = {
-        "performance_trend": adaptive_result["performance_trend"],
-        "recommended_action": adaptive_result["recommended_action"],
+        **(state.get("last_adaptive_response") or {}),
         "next_assessment_difficulty": next_difficulty,
-        "strength_areas": adaptive_result["strength_areas"],
-        "weak_areas": adaptive_result["weak_areas"],
-        "crs": adaptive_result.get("crs"),
+        "crs": crs_for_response,
     }
     new_state = {
         **state,
@@ -580,16 +779,27 @@ async def submit_adaptive_answer(
     }
     updated = update_assessment_adaptive_state(
         session["id"],
-        questions=questions,
+        # No `questions=` here: this endpoint no longer appends questions
+        # itself (that only ever happens in the block background task), so
+        # writing back the possibly-stale `questions` list captured at the
+        # top of this request could clobber items a concurrently-finishing
+        # background block just added. Leaving it out means this write
+        # keeps whatever the DB row's questions currently are and the
+        # returned `updated` reflects that current state.
         selected_difficulty=next_difficulty,
         adaptive_state=new_state,
-        completion_status="started",
+        completion_status="generating",
     )
-    save_generated_questions({**session, "questions": [next_question]})
+    # The next question is either already generated as part of its block, or
+    # still on its way from the block's background task (scheduled either at
+    # assessment creation for Q2-5, or above for Q6-10) — either way, no
+    # generation is triggered here, and none is ever blocking this response.
+    next_question_pending = len(updated.get("questions") or []) <= next_index
     return {
         "completed": False,
         "session": updated,
-        "adaptive_response": {"next_assessment_difficulty": next_difficulty, "crs": adaptive_result.get("crs")},
+        "next_question_pending": next_question_pending,
+        "adaptive_response": {"next_assessment_difficulty": next_difficulty, "crs": crs_for_response},
     }
 
 
@@ -597,16 +807,61 @@ async def submit_adaptive_answer(
 async def submit_assessment(
     request: SubmitAssessmentRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    """Retained endpoint with a clear guard against bypassing protocol order."""
+    """Timeout auto-submit (item 3): finalize with whatever was answered
+    when the assessment clock runs out.
+
+    In-order answering of all ten questions must still go through
+    /api/assessment/answer, unchanged — this endpoint never accepts or
+    grades a submitted answer itself (SubmitAssessmentRequest.answers is
+    intentionally ignored: the ledger of graded answers already recorded
+    via /answer is the only source of truth). This endpoint only exists to
+    let a real timer expiry force finalization when fewer than ten
+    questions were reached, so the study session is never left stranded.
+    """
     session = get_assessment_session(request.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Assessment session not found")
     if session.get("student_id") != current_user.id:
         raise HTTPException(status_code=403, detail="Not your session")
-    raise HTTPException(
-        status_code=409,
-        detail="Submit each of the ten assessment questions in sequence via /api/assessment/answer.",
+
+    state = dict(session.get("adaptive_state") or {})
+
+    if session.get("completion_status") == "completed":
+        # Idempotent: either the 10th /answer already finalized this
+        # session, or a duplicate timeout call arrived (e.g. a retry). Both
+        # cases must not call complete_study_session or re-finalize again.
+        final_result = state.get("final_result")
+        if final_result:
+            return final_result
+        raise HTTPException(
+            status_code=409,
+            detail="This assessment is already completed.",
+        )
+
+    answers = dict(state.get("answers") or {})
+    if len(answers) >= TOTAL_QUESTIONS:
+        raise HTTPException(
+            status_code=409,
+            detail="This assessment already contains its ten protocol questions.",
+        )
+
+    try:
+        study_session = get_or_create_active_study_session(
+            current_user.id,
+            requested_study_session_id=session["study_session_id"],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    return _finalize_assessment(
+        session=session,
+        study_session=study_session,
+        state=state,
+        current_user=current_user,
+        db=db,
+        allow_partial=True,
     )
 
 

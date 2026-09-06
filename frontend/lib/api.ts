@@ -577,6 +577,10 @@ export interface AssessmentResult {
   timeSpent: number
   correctAnswers: number
   totalQuestions: number
+  // FIX (perf/timeout request, item 3): present when this result came from
+  // the timeout auto-submit path rather than a full 10/10 finish.
+  timedOut?: boolean
+  answeredCount?: number
   difficulty: string
   message: string
   nextDifficulty: "easy" | "medium" | "hard"
@@ -635,6 +639,11 @@ export async function submitAdaptiveAnswer(
   completed: boolean
   session: AssessmentSession
   result?: AssessmentResult | null
+  // FIX (perf/timeout request, item 1): true when the next question's
+  // FLAN-T5 generation was handed off to a background task instead of
+  // blocking this response — the caller should poll getAssessmentSession
+  // until session.questions grows before advancing.
+  nextQuestionPending?: boolean
   adaptiveResponse?: {
     nextAssessmentDifficulty: "easy" | "medium" | "hard"
     crs?: CrsBlock
@@ -661,8 +670,23 @@ export async function submitAdaptiveAnswer(
 }
 
 /**
+ * GET /api/assessment/session/{id}
+ * FIX (perf/timeout request, item 1): used to poll for the next question
+ * once submitAdaptiveAnswer reports nextQuestionPending, since generation
+ * now finishes in the backend after the /answer response has already
+ * returned.
+ */
+export async function getAssessmentSession(sessionId: string): Promise<AssessmentSession> {
+  return apiFetch<AssessmentSession>(`/assessment/session/${sessionId}`)
+}
+
+/**
  * POST /api/assessment/submit
- * Submits answers → backend grades, runs adaptive engine, returns result + XP.
+ * FIX (perf/timeout request, item 3): now used specifically as the timeout
+ * auto-submit path — finalizes with whatever was already graded via
+ * submitAdaptiveAnswer when the assessment clock runs out. It does not
+ * grade `answers` itself; the per-question ledger from /answer is the
+ * source of truth.
  */
 export async function submitAssessment(
   sessionId: string,
