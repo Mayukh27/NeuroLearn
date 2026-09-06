@@ -259,6 +259,7 @@ class QuestionGenerator:
                 )
 
             generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            logger.info(f"FLAN RAW OUTPUT: {generated_text}")
 
             # Parse generated text
             parsed = self._parse_generated_question(generated_text)

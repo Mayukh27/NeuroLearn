@@ -150,7 +150,7 @@ function VideoContent() {
     let cancelled = false
     ;(async () => {
       try {
-        const session = await startStudySession(course.id, undefined, course.id)
+        const session = await startStudySession(course.id, selectedVideo.id, course.id)
         if (!cancelled) setStudySession(session)
       } catch (err) {
         console.error("Failed to start study session:", err)
@@ -296,9 +296,6 @@ function VideoContent() {
       videoTitle: selectedVideo?.title || "Video Session",
       behavioral_cue: Math.round(effectiveBehavioralCue).toString(),
       attentionData: JSON.stringify(attentionSummary),
-      transcript: Object.entries(transcriptsToPersist)
-        .map(([id, text]) => `[Video ${id}]\n${text}`)
-        .join("\n\n"),
     })
     router.push(`/assessment?${params.toString()}`)
     } catch (err) {

@@ -1,5 +1,31 @@
 "use client"
-
+declare global {
+  interface Window {
+    YT?: {
+      Player: new (
+        element: HTMLIFrameElement,
+        options: {
+          events?: {
+            onReady?: () => void
+            onStateChange?: (event: { data: number }) => void
+          }
+        }
+      ) => {
+        getCurrentTime?: () => number
+        getDuration?: () => number
+        playVideo?: () => void
+        pauseVideo?: () => void
+      }
+      PlayerState?: {
+        ENDED: number
+        PLAYING: number
+        PAUSED: number
+        BUFFERING: number
+      }
+    }
+    onYouTubeIframeAPIReady?: () => void
+  }
+}
 import { useRef, useState, useEffect, useCallback, useMemo } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import {
@@ -66,8 +92,24 @@ export default function VideoPlayer({
 }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  const youtubePlayerRef = useRef<{
+    getCurrentTime?: () => number
+    getDuration?: () => number
+    playVideo?: () => void
+    pauseVideo?: () => void
+  } | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
 
+
+  const onTimeUpdateRef = useRef(onTimeUpdate)
+  const onPlayStateChangeRef = useRef(onPlayStateChange)
+  const onVideoEndRef = useRef(onVideoEnd)
+
+  useEffect(() => {
+    onTimeUpdateRef.current = onTimeUpdate
+    onPlayStateChangeRef.current = onPlayStateChange
+    onVideoEndRef.current = onVideoEnd
+  }, [onTimeUpdate, onPlayStateChange, onVideoEnd])
   const [isPlaying, setIsPlaying] = useState(false)
   const [progress, setProgress] = useState(0)
   const [duration, setDuration] = useState(0)
@@ -135,104 +177,133 @@ export default function VideoPlayer({
       video.removeEventListener("error", onError)
     }
   }, [videoType, videoUrl, onTimeUpdate, onPlayStateChange, onVideoEnd])
-
-  // ── YouTube simulated time tracking ──
-  useEffect(() => {
-    if (videoType !== "youtube" || !isPlaying) return
-    const interval = setInterval(() => {
-      setCurrentTime((prev) => {
-        const next = prev + 1
-        onTimeUpdate?.(next, duration || 600)
-        setProgress(duration ? (next / duration) * 100 : 0)
-        return next
-      })
-    }, 1000)
-    return () => clearInterval(interval)
-  }, [videoType, isPlaying, duration, onTimeUpdate])
-
-  // ── YouTube IFrame ENDED detection ──
-  //
-  // FIX (Phase 5): YouTube iframes post messages in two distinct formats
-  // depending on the player build and region:
-  //
-  //   Format A (YouTube IFrame API protocol):
-  //     {"event":"onStateChange","info":0}
-  //
-  //   Format B (infoDelivery, sent by some YouTube builds continuously
-  //   and also on terminal state transitions):
-  //     {"event":"infoDelivery","info":{"playerState":0, ...}}
-  //
-  // The previous code only checked Format A, so any YouTube environment
-  // that sends only Format B never triggered onVideoEnd — the completion
-  // callback was never called, no network request appeared in the Network
-  // tab, and study_video_completions remained empty.
-  //
-  // The fix extracts playerState from EITHER format: if it resolves to 0
-  // (YT.PlayerState.ENDED) the video is done and onVideoEnd fires.
-  //
-  // deduplication ref (endedFiredRef): YouTube may send the ENDED state
-  // multiple times (once via onStateChange, once via infoDelivery, or
-  // after a brief "buffering before end" transition). Without the ref,
-  // onVideoEnd would fire twice — persisting the same video twice in
-  // study_video_completions and calling completeStudyVideo twice. The
-  // backend uses idempotent upsert so duplicates are harmless there, but
-  // double-firing at the frontend wastes a request and could confuse
-  // any in-flight state that's not idempotent.
+  // ── YouTube IFrame Player API ──
   useEffect(() => {
     if (videoType !== "youtube") return
 
-    let endedFired = false
+    let cancelled = false
 
-    const onYouTubeMessage = (event: MessageEvent) => {
-      try {
-        if (!/youtube\.com$|youtube-nocookie\.com$/.test(new URL(event.origin).hostname)) return
-        const payload = typeof event.data === "string" ? JSON.parse(event.data) : event.data
+    const handleStateChange = (event: { data: number }) => {
+      if (cancelled) return
 
-        // Normalise playerState from either message format.
-        let ytState: number | undefined
-        if (payload?.event === "onStateChange") {
-          // Format A: info is the state integer directly.
-          ytState = typeof payload.info === "number" ? payload.info : undefined
-        } else if (payload?.event === "infoDelivery") {
-          // Format B: state is nested inside the info object.
-          ytState = typeof payload?.info?.playerState === "number"
-            ? payload.info.playerState
-            : undefined
-        }
+      const state = event.data
+      console.log("YouTube state changed:", state)
 
-        if (ytState === 0) {
-          // 0 = YT.PlayerState.ENDED
-          if (endedFired) return   // deduplicate within this listener lifetime
-          endedFired = true
-          setIsPlaying(false)
-          onPlayStateChange?.(false)
-          onVideoEnd?.()
-        }
-      } catch {
-        // Ignore unrelated cross-window messages and non-JSON payloads.
+
+      if (state === 0) {
+        // YouTube PlayerState.ENDED
+        setIsPlaying(false)
+        setProgress(100)
+
+        const player = youtubePlayerRef.current
+        const current = player?.getCurrentTime?.() ?? 0
+        const dur = player?.getDuration?.() ?? duration
+
+        setCurrentTime(current)
+        setDuration(dur)
+        onTimeUpdateRef.current?.(current, dur)
+        onPlayStateChangeRef.current?.(false)
+        onVideoEndRef.current?.()
+        return
+      }
+
+      if (state === 1) {
+        // PLAYING
+        setIsPlaying(true)
+        onPlayStateChangeRef.current?.(true)
+        return
+      }
+
+      if (state === 2) {
+        // PAUSED
+        setIsPlaying(false)
+        onPlayStateChangeRef.current?.(false)
       }
     }
-    window.addEventListener("message", onYouTubeMessage)
-    return () => window.removeEventListener("message", onYouTubeMessage)
-  }, [videoType, onPlayStateChange, onVideoEnd])
+
+    const createPlayer = () => {
+      if (
+        cancelled ||
+        !iframeRef.current ||
+        !window.YT?.Player
+      ) {
+        return
+      }
+
+      youtubePlayerRef.current = new window.YT.Player(
+        iframeRef.current,
+        {
+          events: {
+            onReady: () => {
+              if (cancelled) return
+
+              const player = youtubePlayerRef.current
+              const dur = player?.getDuration?.() ?? 0
+
+              if (dur > 0) {
+                setDuration(dur)
+               onTimeUpdateRef.current?.(0, dur)
+              }
+            },
+
+            onStateChange: handleStateChange,
+          },
+        }
+      )
+    }
+
+    if (window.YT?.Player) {
+      createPlayer()
+    } else {
+      const previousReady = window.onYouTubeIframeAPIReady
+
+      window.onYouTubeIframeAPIReady = () => {
+        previousReady?.()
+        createPlayer()
+      }
+
+      const existingScript = document.querySelector(
+        'script[src="https://www.youtube.com/iframe_api"]'
+      )
+
+      if (!existingScript) {
+        const script = document.createElement("script")
+        script.src = "https://www.youtube.com/iframe_api"
+        script.async = true
+        document.body.appendChild(script)
+      }
+    }
+
+    return () => {
+      cancelled = true
+      youtubePlayerRef.current = null
+    }
+  }, [videoType, videoUrl])
 
   const togglePlay = useCallback(() => {
     if (videoType === "mp4") {
       const video = videoRef.current
       if (!video) return
-      if (isPlaying) video.pause()
-      else video.play().catch(() => setHasError(true))
+
+      if (isPlaying) {
+        video.pause()
+      } else {
+        video.play().catch(() => setHasError(true))
+      }
+
+      const next = !isPlaying
+      setIsPlaying(next)
+      onPlayStateChange?.(next)
+      return
     }
-    if (videoType === "youtube" && iframeRef.current?.contentWindow) {
-      const cmd = isPlaying ? "pauseVideo" : "playVideo"
-      iframeRef.current.contentWindow.postMessage(
-        JSON.stringify({ event: "command", func: cmd, args: "" }),
-        "*"
-      )
+
+    if (videoType === "youtube") {
+      if (isPlaying) {
+        youtubePlayerRef.current?.pauseVideo?.()
+      } else {
+        youtubePlayerRef.current?.playVideo?.()
+      }
     }
-    const next = !isPlaying
-    setIsPlaying(next)
-    onPlayStateChange?.(next)
   }, [isPlaying, videoType, onPlayStateChange])
 
   const seek = (offset: number) => {
