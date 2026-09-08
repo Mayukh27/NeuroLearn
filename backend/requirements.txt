@@ -15,6 +15,7 @@ fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
 python-multipart>=0.0.9
 python-dotenv>=1.0.0
+requests>=2.31.0
 
 # ── Data / Storage ─────────────────────────────────────────
 # Postgres (replaces tinydb — see data/db.py, data/models_orm.py)

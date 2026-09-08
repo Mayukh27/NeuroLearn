@@ -3,12 +3,21 @@
 One study session produces one 10-item assessment: a single MCRF decision
 (from the learner's MCRF/CRS state for the completed study session as a
 whole) sets ONE difficulty for all of questions 1--5; a single LEGACY
-decision, made once at the Q5->Q6 boundary, sets ONE difficulty for all of
-questions 6--10. This is protocol-level, not item-level, adaptivity: a
-question's correctness, response time, or outcome is used only for scoring
-and never changes the difficulty of the question after it. The engines
-themselves remain in :mod:`ml.adaptive_engine`; this router owns only their
-protocol, evidence flow, and durable study logging.
+decision (from the learner's durable historical performance) sets ONE
+difficulty for all of questions 6--10. Both decisions are made up front, at
+/generate time, before any question is generated or shown — never
+recomputed from an in-assessment answer. This is protocol-level, not
+item-level, adaptivity: a question's correctness, response time, or outcome
+is used only for scoring/research logging and never changes the difficulty
+of any question, including subsequent ones in the same block.
+
+All ten questions are generated and persisted at /generate time, before Q1
+is ever presented to the student. /answer therefore never generates a
+question — it only validates the current question, records the answer,
+computes scoring/research response information, and returns the
+already-existing next question. The engines themselves remain in
+:mod:`ml.adaptive_engine`; this router owns only their protocol, evidence
+flow, and durable study logging.
 """
 
 from __future__ import annotations
@@ -18,7 +27,7 @@ import time
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
@@ -49,6 +58,8 @@ from data.database import (
 from data.db import get_db
 from data.models_orm import User
 from ml import adaptive_engine, question_generator
+from ml.llm_providers import LLMProviderError
+from ml.question_generator import QuestionGenerationError
 from schemas.models import (
     AssessmentResult,
     AssessmentSession,
@@ -92,109 +103,103 @@ def _generate_unique_question(
     method: str,
     question_index: int,
 ) -> dict:
-    """Generate exactly one new, non-duplicate item for the current session."""
+    """Generate exactly one new, non-duplicate item for the current session.
+
+    Content quality (well-formed, non-generic, transcript-grounded,
+    non-duplicate-within-a-call) is handled inside question_generator.py
+    itself, with a small bounded number of internally-varied attempts per
+    call. This loop's only remaining job is the one thing only the caller
+    can know: whether the result duplicates a sibling question already
+    generated elsewhere in *this* assessment. `question_index` is
+    forwarded as `segment_offset`, so each of the ten questions in an
+    assessment is grounded in a different part of the transcript.
+
+    NO STATIC FALLBACK: if the LLM provider fails (connection, timeout,
+    missing model, bad response) or a valid question can't be produced,
+    this raises an HTTPException — it never substitutes a static
+    question-bank item. A generation failure must be visible, not hidden.
+    """
     existing_ids = {str(question.get("id")) for question in existing_questions}
     existing_texts = {_question_text_key(question) for question in existing_questions}
-    for _ in range(20):
-        generated = question_generator.generate_questions(
-            transcript_text=transcript_text,
-            difficulty=difficulty,
-            num_questions=1,
-            topic_id=topic_id,
-        )
-        if not generated:
+    last_detail = "unknown error"
+    for attempt in range(3):
+        try:
+            generated = question_generator.generate_questions(
+                transcript_text=transcript_text,
+                difficulty=difficulty,
+                num_questions=1,
+                topic_id=topic_id,
+                segment_offset=question_index + attempt,
+            )
+        except LLMProviderError as exc:
+            # Infra-level failure (Ollama unreachable, model not pulled,
+            # request timed out, unparseable response) — this is never a
+            # "try again" situation the same way a content-quality
+            # rejection is, so fail the whole assessment generation
+            # immediately and clearly rather than burning more attempts.
+            logger.error(f"LLM provider unavailable while generating question {question_index + 1}: {exc}")
+            raise HTTPException(status_code=502, detail=f"LLM provider unavailable: {exc}") from exc
+        except QuestionGenerationError as exc:
+            logger.warning(f"Question generation failed validation for question {question_index + 1}: {exc}")
+            last_detail = str(exc)
             continue
+
         question = dict(generated[0])
         if question.get("id") in existing_ids or _question_text_key(question) in existing_texts:
+            last_detail = "duplicate of an existing question in this assessment"
+            logger.warning(f"Question rejected: {last_detail} (question {question_index + 1})")
             continue
         question["adaptive_method"] = method
         question["decision_index"] = question_index + 1
         return question
+
     raise HTTPException(
         status_code=503,
-        detail="Could not generate a unique question for this assessment. Please retry later.",
+        detail=f"Question generation failed validation for question {question_index + 1}: {last_detail}",
     )
 
 
-async def _generate_and_store_question_block(
+async def _generate_question_block(
     *,
-    session_id: str,
     transcript_text: str,
     difficulty: str,
     topic_id: str,
     method: str,
     start_index: int,
     count: int,
-) -> None:
-    """Generate and persist a whole block of questions at one, already-fixed
-    difficulty (protocol correction: difficulty is decided once per block —
-    MCRF for Q1-5, LEGACY for Q6-10 — never recomputed from the previous
-    question's correctness/timing). Runs after the triggering response has
-    already been sent, so FLAN-T5 generation never blocks grading/persisting
-    an answer or the client-side timer.
+    existing_questions: list[dict],
+) -> list[dict]:
+    """Generate a whole block of `count` questions at one, already-fixed
+    difficulty (MCRF for Q1-5, LEGACY for Q6-10) and return them.
+
+    All ten questions must exist, persisted, before Q1 is ever shown to the
+    student — there is no "answer Q_n -> generate Q_n+1" step anywhere.
+    This is called twice from generate_assessment, once per block, before
+    the assessment session is first returned; /answer never calls this (or
+    anything else that generates a question).
+
+    NO STATIC FALLBACK: `_generate_unique_question` already raises a clear
+    HTTPException on failure — that exception is intentionally left to
+    propagate straight out of this function and out of /generate. It must
+    NOT be caught here and papered over with a question-bank substitute.
     """
-    current = get_assessment_session(session_id)
-    if not current:
-        return
-    existing_questions = list(current.get("questions") or [])
-    have_indices = {q.get("decision_index") for q in existing_questions}
     generated: list[dict] = []
     for offset in range(count):
         index = start_index + offset
-        if (index + 1) in have_indices:
-            continue  # already generated (e.g. a retried trigger)
-        try:
-            # run_in_threadpool: _generate_unique_question is a blocking,
-            # CPU-bound call (tokenize + FLAN-T5 forward pass); running it
-            # off the event loop keeps other requests (e.g. session
-            # polling) responsive while it runs.
-            question = await run_in_threadpool(
-                _generate_unique_question,
-                transcript_text=transcript_text,
-                difficulty=difficulty,
-                topic_id=topic_id,
-                existing_questions=existing_questions + generated,
-                method=method,
-                question_index=index,
-            )
-        except Exception:
-            logger.exception(
-                f"Background question generation failed for session {session_id}, "
-                f"question_index={index}; falling back to question bank."
-            )
-            try:
-                bank_questions = question_generator._generate_from_bank(difficulty, 1, topic_id)
-            except Exception:
-                logger.exception(f"Question-bank fallback also failed for session {session_id}")
-                continue
-            if not bank_questions:
-                continue
-            question = dict(bank_questions[0])
-            question["adaptive_method"] = method
-            question["decision_index"] = index + 1
+        # run_in_threadpool: generation makes a blocking HTTP call to the
+        # LLM provider; running it off the event loop keeps other requests
+        # responsive while the whole 10-question set is generated up front.
+        question = await run_in_threadpool(
+            _generate_unique_question,
+            transcript_text=transcript_text,
+            difficulty=difficulty,
+            topic_id=topic_id,
+            existing_questions=existing_questions + generated,
+            method=method,
+            question_index=index,
+        )
         generated.append(question)
-
-    if not generated:
-        return
-
-    # Re-read so we merge onto the latest questions list rather than one
-    # captured before other concurrent writes landed.
-    current = get_assessment_session(session_id)
-    if not current:
-        return
-    latest_questions = list(current.get("questions") or [])
-    have_indices = {q.get("decision_index") for q in latest_questions}
-    to_add = [q for q in generated if q.get("decision_index") not in have_indices]
-    if not to_add:
-        return
-    latest_questions.extend(to_add)
-    latest_questions.sort(key=lambda q: q.get("decision_index", 0))
-    update_assessment_adaptive_state(
-        session_id,
-        questions=latest_questions,
-        completion_status="started",
-    )
-    save_generated_questions({**current, "questions": to_add})
+    return generated
 
 
 def _assessment_score(responses: list[dict]) -> float:
@@ -279,6 +284,44 @@ def _decision_for_question(
         transcript_text=session.get("transcript_text") or "",
         was_correct=was_correct,
     )
+
+
+def _decide_legacy_block_difficulty(
+    *,
+    student_id: str,
+    durable_scores: list[float],
+) -> dict:
+    """Determine the single, frozen LEGACY difficulty for Q6-10, up front,
+    before any assessment question exists or is answered.
+
+    This is the LEGACY-condition analogue of `get_initial_difficulty()`'s
+    role for the MCRF block: it uses only evidence that exists *before* the
+    assessment starts (the student's durable historical scores), never
+    current-assessment answers, so both block difficulties can be decided
+    together before question generation begins. It intentionally goes
+    through `_get_initial_difficulty_legacy` (the rule-cascade engine's own
+    initial-difficulty path) rather than `_determine_difficulty_legacy`,
+    since the latter requires a just-answered score/timing pair that does
+    not exist yet at this point in the flow. `attention_score=50` (neutral)
+    matches the existing design: the LEGACY condition deliberately does not
+    receive video behavioral-cue evidence.
+    """
+    legacy_initial = adaptive_engine._get_initial_difficulty_legacy(
+        student_id=student_id,
+        attention_score=50,
+        previous_score=durable_scores[-1] if durable_scores else None,
+    )
+    difficulty = legacy_initial["difficulty"]
+    reason = legacy_initial["adaptive_metadata"]["reason"]
+    return {
+        "difficulty": difficulty,
+        "performance_trend": "stable",
+        "recommended_action": reason,
+        "next_assessment_difficulty": difficulty,
+        "strength_areas": [],
+        "weak_areas": [],
+        "_debug": {"engine": "legacy_rule_cascade_initial", "reason": reason},
+    }
 
 
 def _record_decision(
@@ -483,7 +526,6 @@ def _finalize_assessment(
 @router.post("/generate", response_model=AssessmentSession)
 async def generate_assessment(
     request: GenerateAssessmentRequest,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
 ):
     """Start or resume the single 10-question mixed-method assessment."""
@@ -533,8 +575,17 @@ async def generate_assessment(
                 detail="Complete at least one video before starting the assessment.",
             )
 
+    # FIX (root-cause pass): this used to treat ANY non-empty question list
+    # as "already generated" and return it as-is. Under the synchronous
+    # 10-question-upfront architecture that's wrong — a session can only
+    # ever be legitimately resumed if it already has all TOTAL_QUESTIONS
+    # persisted. A session with fewer (e.g. a single leftover Q1 from an
+    # older code path, or one that failed partway through a prior
+    # /generate call) is not a valid resumable session; falling through
+    # regenerates it correctly below instead of permanently serving a
+    # truncated assessment for this study session.
     existing_session = get_canonical_assessment_session_for_study(study_session["study_session_id"])
-    if existing_session and existing_session.get("questions"):
+    if existing_session and len(existing_session.get("questions") or []) >= TOTAL_QUESTIONS:
         return existing_session
 
     # Protocol correction: MCRF is evaluated ONCE per assessment, from the
@@ -557,18 +608,45 @@ async def generate_assessment(
         responses=[],
     )
     mcrf_difficulty = initial["difficulty"]
-    # Q1 is generated synchronously so there is something to show
-    # immediately; Q2-Q5 use the identical mcrf_difficulty and are generated
-    # in the background right away (their content never depends on how Q1
-    # is answered), so answering never has to wait on FLAN-T5 for them.
-    question = _generate_unique_question(
+
+    # Protocol correction (item 2): LEGACY is now also decided ONCE, up
+    # front, alongside MCRF — before any question is generated or answered
+    # — instead of at the old Q5->Q6 boundary. It uses only durable,
+    # pre-assessment historical evidence (never this assessment's own
+    # answers, which don't exist yet), so both block difficulties are fixed
+    # before generation starts, per the "determine both difficulties, then
+    # generate all ten questions" protocol.
+    legacy_decision = _decide_legacy_block_difficulty(
+        student_id=current_user.id,
+        durable_scores=durable_scores,
+    )
+    legacy_difficulty = legacy_decision["difficulty"]
+
+    # Generate ALL ten questions now, before the assessment is ever
+    # returned/shown: Q1-5 at the single frozen MCRF difficulty, Q6-10 at
+    # the single frozen LEGACY difficulty. Nothing about how any question is
+    # answered changes any other question's difficulty, and /answer below
+    # never generates a question — it only ever returns ones generated here.
+    mcrf_questions = await _generate_question_block(
         transcript_text=transcript_text,
         difficulty=mcrf_difficulty,
         topic_id=request.course_id,
-        existing_questions=[],
         method="MCRF",
-        question_index=0,
+        start_index=0,
+        count=MCRF_QUESTION_COUNT,
+        existing_questions=[],
     )
+    legacy_questions = await _generate_question_block(
+        transcript_text=transcript_text,
+        difficulty=legacy_difficulty,
+        topic_id=request.course_id,
+        method="LEGACY",
+        start_index=MCRF_QUESTION_COUNT,
+        count=TOTAL_QUESTIONS - MCRF_QUESTION_COUNT,
+        existing_questions=mcrf_questions,
+    )
+    all_questions = mcrf_questions + legacy_questions
+
     adaptive_metadata = initial["adaptive_metadata"]
     session = {
         "id": f"session_{uuid.uuid4().hex[:12]}",
@@ -578,7 +656,7 @@ async def generate_assessment(
         "course_id": request.course_id,
         "video_id": contributing_video_ids[-1],
         "contributing_video_ids": contributing_video_ids,
-        "questions": [question],
+        "questions": all_questions,
         "difficulty": mcrf_difficulty,
         "time_limit": TIME_LIMIT_SECONDS,
         "attention_score_during_video": attention_score,
@@ -592,11 +670,12 @@ async def generate_assessment(
             "answers": {},
             "responses": [],
             "adaptive_metadata": adaptive_metadata,
-            # Frozen, assessment-level block difficulties (item: no
-            # per-question adaptivity). mcrf_block covers Q1-5;
-            # legacy_block is filled in once, at the Q5->Q6 boundary.
+            # Frozen, assessment-level block difficulties (no per-question
+            # adaptivity): both are decided once, here, before any question
+            # is shown or answered. mcrf_block covers Q1-5, legacy_block
+            # covers Q6-10.
             "mcrf_block_difficulty": mcrf_difficulty,
-            "legacy_block_difficulty": None,
+            "legacy_block_difficulty": legacy_difficulty,
             "last_adaptive_response": {
                 "performance_trend": "stable",
                 "recommended_action": adaptive_metadata["reason"],
@@ -611,7 +690,8 @@ async def generate_assessment(
     save_generated_questions(session)
     # One research decision record per question (unchanged export shape),
     # but every one of Q1-Q5's records carries this same, single MCRF
-    # decision — none are re-evaluated from answer correctness.
+    # decision and every one of Q6-Q10's records carries this same, single
+    # LEGACY decision — none are re-evaluated from answer correctness.
     _record_block_decision(
         method="MCRF",
         study_session=study_session,
@@ -623,15 +703,16 @@ async def generate_assessment(
         block_start_index=0,
         block_size=MCRF_QUESTION_COUNT,
     )
-    background_tasks.add_task(
-        _generate_and_store_question_block,
-        session_id=session["id"],
-        transcript_text=transcript_text,
-        difficulty=mcrf_difficulty,
-        topic_id=request.course_id,
-        method="MCRF",
-        start_index=1,
-        count=MCRF_QUESTION_COUNT - 1,
+    _record_block_decision(
+        method="LEGACY",
+        study_session=study_session,
+        assessment_session=session,
+        adaptive_result=legacy_decision,
+        previous_scores=durable_scores,
+        responses=[],
+        previous_difficulty=mcrf_difficulty,
+        block_start_index=MCRF_QUESTION_COUNT,
+        block_size=TOTAL_QUESTIONS - MCRF_QUESTION_COUNT,
     )
     return session
 
@@ -639,11 +720,18 @@ async def generate_assessment(
 @router.post("/answer")
 async def submit_adaptive_answer(
     request: SubmitAdaptiveAnswerRequest,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Record one sequential response and create at most the next item."""
+    """Validate the current question, record the answer, score it, and
+    return the already-existing next question.
+
+    Fix (item 2): all ten questions were generated and persisted at
+    /generate time, so this endpoint never generates a question — it only
+    validates + records + scores + returns what's already there. Difficulty
+    for the next question is never recomputed here either (item 1): it is
+    just read back from the two block difficulties frozen at /generate.
+    """
     session = get_assessment_session(request.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Assessment session not found")
@@ -706,64 +794,19 @@ async def submit_adaptive_answer(
         return {"completed": True, "session": updated, "result": result}
 
     next_index = answered_count
-    next_method = _method_for_question(next_index)
 
     # ── Protocol correction ──────────────────────────────────────────────
-    # Difficulty is NOT re-evaluated per question. Q1-Q5 all use the single
-    # MCRF decision made at assessment creation; Q6-Q10 all use a single
-    # LEGACY decision made once, right here, the first time we cross into
-    # the LEGACY block (i.e. immediately after Q5 is answered) — using the
-    # learner's MCRF/CRS-derived state for the study session as a whole,
-    # exactly as before at this same boundary. Once set, that LEGACY value
-    # is frozen for Q7-Q10 too: no subsequent answer inside either block
-    # changes the difficulty of the question after it.
+    # Difficulty is NEVER re-evaluated per question here. Both block
+    # difficulties (MCRF for Q1-5, LEGACY for Q6-10) were already decided
+    # once, up front, in /generate — before Q1 was ever shown — and are
+    # simply read back from the frozen adaptive_state below. No answer's
+    # correctness, response time, or outcome changes any subsequent
+    # question's difficulty.
     if next_index < MCRF_QUESTION_COUNT:
         next_difficulty = state.get("mcrf_block_difficulty") or session.get("difficulty", "medium")
-        crs_for_response = (state.get("last_adaptive_response") or {}).get("crs")
-    elif next_index == MCRF_QUESTION_COUNT:
-        # One-time LEGACY block decision, computed from Q1-Q5 evidence as a
-        # whole (unchanged engine call/inputs — just invoked once here
-        # instead of on every subsequent LEGACY-block answer).
-        durable_scores = get_recent_scores_pct(current_user.id, limit=5)
-        legacy_decision = _decision_for_question(
-            question_index=next_index,
-            student_id=current_user.id,
-            session={**session, "questions": questions},
-            durable_scores=durable_scores,
-            responses=responses,
-        )
-        next_difficulty = legacy_decision.get("difficulty", legacy_decision.get("next_assessment_difficulty"))
-        evidence_responses = _responses_for_method(responses, next_method) or responses
-        performance_history = (durable_scores + [
-            _assessment_score(evidence_responses[:index + 1])
-            for index in range(len(evidence_responses))
-        ])[-5:]
-        _record_block_decision(
-            method="LEGACY",
-            study_session=study_session,
-            assessment_session={**session, "questions": questions},
-            adaptive_result=legacy_decision,
-            previous_scores=performance_history,
-            responses=evidence_responses,
-            previous_difficulty=question.get("difficulty"),
-            block_start_index=MCRF_QUESTION_COUNT,
-            block_size=TOTAL_QUESTIONS - MCRF_QUESTION_COUNT,
-        )
-        state = {**state, "legacy_block_difficulty": next_difficulty}
-        crs_for_response = legacy_decision.get("crs")
-        background_tasks.add_task(
-            _generate_and_store_question_block,
-            session_id=session["id"],
-            transcript_text=session.get("transcript_text") or "",
-            difficulty=next_difficulty,
-            topic_id=session.get("course_id") or "course_001",
-            method="LEGACY",
-            start_index=MCRF_QUESTION_COUNT,
-            count=TOTAL_QUESTIONS - MCRF_QUESTION_COUNT,
-        )
     else:
         next_difficulty = state.get("legacy_block_difficulty") or session.get("difficulty", "medium")
-        crs_for_response = (state.get("last_adaptive_response") or {}).get("crs")
+    crs_for_response = (state.get("last_adaptive_response") or {}).get("crs")
 
     last_adaptive = {
         **(state.get("last_adaptive_response") or {}),
@@ -777,28 +820,24 @@ async def submit_adaptive_answer(
         "answered_count": answered_count,
         "last_adaptive_response": last_adaptive,
     }
+    # All ten questions were generated and persisted together in /generate
+    # and are never mutated afterward, so writing `questions=questions` back
+    # here is safe (there is no concurrent background block that could add
+    # to it) and keeps the returned session's question list authoritative.
     updated = update_assessment_adaptive_state(
         session["id"],
-        # No `questions=` here: this endpoint no longer appends questions
-        # itself (that only ever happens in the block background task), so
-        # writing back the possibly-stale `questions` list captured at the
-        # top of this request could clobber items a concurrently-finishing
-        # background block just added. Leaving it out means this write
-        # keeps whatever the DB row's questions currently are and the
-        # returned `updated` reflects that current state.
+        questions=questions,
         selected_difficulty=next_difficulty,
         adaptive_state=new_state,
-        completion_status="generating",
+        completion_status="started",
     )
-    # The next question is either already generated as part of its block, or
-    # still on its way from the block's background task (scheduled either at
-    # assessment creation for Q2-5, or above for Q6-10) — either way, no
-    # generation is triggered here, and none is ever blocking this response.
-    next_question_pending = len(updated.get("questions") or []) <= next_index
+    # The next question already exists — it was generated up front in
+    # /generate, along with all ten questions, before this assessment was
+    # ever shown to the student. This endpoint never generates a question.
     return {
         "completed": False,
         "session": updated,
-        "next_question_pending": next_question_pending,
+        "next_question_pending": False,
         "adaptive_response": {"next_assessment_difficulty": next_difficulty, "crs": crs_for_response},
     }
 

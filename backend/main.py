@@ -45,6 +45,7 @@ from services.attention_log_purge_scheduler import (
 
 # Import ML models (for health check)
 from ml import attention_detector, transcription_service, question_generator
+from config.llm_config import LLM_CONFIG
 
 
 # ── Lifespan: Startup & Shutdown ──
@@ -82,7 +83,10 @@ async def lifespan(app: FastAPI):
     # Log ML model status
     logger.info(f"Behavioral Cue Model:     {'LIVE' if attention_detector.face_mesh else 'DUMMY'}")
     logger.info(f"Transcription Model: {'LIVE' if transcription_service.model else 'DUMMY'}")
-    logger.info(f"Question Generator:  {'LIVE' if question_generator.model else 'DUMMY'}")
+    logger.info(
+        f"Question Generator:  {'LIVE' if question_generator.provider else 'DUMMY'} "
+        f"(provider={LLM_CONFIG.provider}, model={LLM_CONFIG.model})"
+    )
     logger.info("=" * 60)
     logger.success("Backend ready! Docs at http://localhost:8000/docs")
 
@@ -103,7 +107,7 @@ app = FastAPI(
         "**ML Models:**\n"
         "- Behavioral Cue Detection (MediaPipe Face Mesh)\n"
         "- Video Transcription (OpenAI Whisper)\n"
-        "- Question Generation (FLAN-T5)\n"
+        "- Question Generation (configurable LLM via Ollama)\n"
         "- Adaptive Difficulty Engine\n\n"
         "**Features:**\n"
         "- Student profiles with gamification (XP, levels, badges)\n"
@@ -112,7 +116,7 @@ app = FastAPI(
         "- Live video transcription\n"
         "- Adaptive assessments that adjust to student performance\n"
         "- Leaderboard, daily challenges, notifications\n"
-        "- **Auto Course Generator** (web scraping, no paid API)\n"
+        "- Auto Course Generator (web scraping, no paid API)\n"
     ),
     version="1.1.0",
     lifespan=lifespan,
@@ -173,7 +177,7 @@ async def health_check():
         "models_loaded": {
             "attention_detector": attention_detector.face_mesh is not None,
             "transcription_whisper": transcription_service.model is not None,
-            "question_generator_flan_t5": question_generator.model is not None,
+            "question_generator_llm": question_generator.provider is not None,
             "adaptive_engine": True,
         },
     }
