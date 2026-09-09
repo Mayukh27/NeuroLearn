@@ -12,13 +12,28 @@
  *   6. If backend down → generate local dummy score
  *
  * Every step is logged to console for debugging.
+ *
+ * FIX (start/stop/revoke): "Stop Camera" and "Revoke Consent" used to be
+ * the same button/action, so pausing the camera silently erased the
+ * consent decision too — the student would be re-prompted with the
+ * consent modal the next time they pressed the button. These are now
+ * three distinct actions (see lib/consent.ts for the shared rationale):
+ *   - Start Camera:   resumes capture. Consent is asked at most once per
+ *                      session; a prior decision on file is reused.
+ *   - Stop Camera:    pauses capture only, consent record untouched, and
+ *                      video-play auto-resume is suppressed until the
+ *                      student presses Start again.
+ *   - Revoke Consent: explicit opt-out; stops capture AND clears consent
+ *                      server-side. Also fires automatically at
+ *                      study-session completion and at logout.
  */
 
 import { useRef, useState, useEffect, useCallback } from "react"
 import { motion } from "framer-motion"
-import { Camera, CameraOff, AlertTriangle, Wifi, WifiOff } from "lucide-react"
+import { Camera, CameraOff, AlertTriangle, Wifi, WifiOff, ShieldOff } from "lucide-react"
 import ConsentModal from "./ConsentModal"
 import { getToken } from "@/lib/auth"
+import { postConsentDecision, registerActiveConsentRevoke } from "@/lib/consent"
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api"
 const CAPTURE_INTERVAL_MS = 500 // capture frame every 500ms
@@ -46,6 +61,13 @@ interface CameraFeedProps {
   studySessionId?: string | null
   onConsentChange?: (granted: boolean) => void
   onAttentionUpdate?: (snapshot: AttentionSnapshotResponse) => void
+  /**
+   * Set true by the parent once the study session has finished (e.g. right
+   * before navigating to the assessment). Camera consent is auto-revoked
+   * when this flips to true — see lib/consent.ts. Leave undefined/false
+   * for pages that don't have a "session complete" concept.
+   */
+  sessionComplete?: boolean
 }
 
 /** Normalize snake_case backend JSON → camelCase frontend type */
@@ -101,6 +123,7 @@ export default function CameraFeed({
   studySessionId,
   onConsentChange,
   onAttentionUpdate,
+  sessionComplete,
 }: CameraFeedProps) {
   // ── Refs (never stale) ──
   const videoElRef = useRef<HTMLVideoElement>(null)
@@ -110,6 +133,18 @@ export default function CameraFeed({
   const cameraReadyRef = useRef(false)
   const isSendingRef = useRef(false)
   const latestFrameRef = useRef<string | null>(null)
+  // FIX (AbortError race): startCamera() is now called from several sites
+  // — the auto-start effect, handleConsentDecision, handleStartCamera,
+  // and the error Retry button — and isActive only flips to true AFTER
+  // getUserMedia()/play() resolve. Two call sites firing in the same tick
+  // (e.g. consent just got granted: handleConsentDecision calls
+  // startCamera() directly while the auto-start effect also fires) used
+  // to both pass the `!isActive` guard and each reassign
+  // `videoEl.srcObject`, aborting the other's pending play() with
+  // "AbortError: The play() request was interrupted by a new load
+  // request." This ref makes startCamera() a no-op while a start is
+  // already in flight or a stream already exists.
+  const startingRef = useRef(false)
 
   // Keep callback/ids in refs so interval never goes stale
   const callbackRef = useRef(onAttentionUpdate)
@@ -140,6 +175,14 @@ export default function CameraFeed({
   const [consentChecked, setConsentChecked] = useState(false)
   const consentGrantedRef = useRef<boolean | null>(null)
   consentGrantedRef.current = consentGranted
+
+  // Stop Camera sets this so the "auto-start when video plays" effect
+  // below doesn't immediately restart capture — the camera stays off
+  // until the student explicitly presses Start Camera again. Consent
+  // itself is untouched by Stop (see file header).
+  const [manuallyStopped, setManuallyStopped] = useState(false)
+  const manuallyStoppedRef = useRef(false)
+  manuallyStoppedRef.current = manuallyStopped
 
   // On mount, check whether this student already has a consent decision
   // on file (e.g. from a previous session) so we don't re-prompt every time.
@@ -174,6 +217,13 @@ export default function CameraFeed({
       setShowConsentPrompt(true)
       return
     }
+    if (startingRef.current || streamRef.current) {
+      // Already starting or already have a live stream — a second
+      // concurrent call here is exactly what produced the play()
+      // AbortError (see startingRef comment above).
+      return
+    }
+    startingRef.current = true
     setIsLoading(true)
     setError(null)
     cameraReadyRef.current = false
@@ -209,11 +259,20 @@ export default function CameraFeed({
       }
     } catch (err: unknown) {
       const e = err as Error
+      // A real concurrent-call collision surfaces here as AbortError —
+      // startingRef should prevent that now, but if it ever slips through
+      // (e.g. the *other* caller's play() got interrupted), don't show it
+      // to the student as a camera failure.
+      if (e.name === "AbortError") {
+        console.warn("[CameraFeed] play() aborted by a concurrent start — ignoring")
+        return
+      }
       console.error("[CameraFeed] Camera error:", e)
       if (e.name === "NotAllowedError") setError("Camera permission denied.")
       else if (e.name === "NotFoundError") setError("No camera found.")
       else setError("Camera error: " + e.message)
     } finally {
+      startingRef.current = false
       setIsLoading(false)
     }
   }, [])
@@ -367,39 +426,43 @@ export default function CameraFeed({
   }, [isActive, onConsentChange])
 
 
+  // Explicit opt-out: stops capture AND clears the consent record
+  // server-side. This is the ONLY path that touches consent — plain
+  // "Stop Camera" (below) never calls this.
   const revokeConsent = useCallback(async () => {
     stopCamera()
     setConsentGranted(false)
     consentGrantedRef.current = false
     onConsentChange?.(false)
-    try {
-      await fetch(`${API_BASE}/attention/consent`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
-        },
-        body: JSON.stringify({
-          student_id: studentIdRef.current,
-          session_id: sessionIdRef.current,
-          study_session_id: studySessionIdRef.current || undefined,
-          granted: false,
-          retention_days: 30,
-          raw_frames_stored: false,
-          version: "1.0",
-        }),
-      })
-    } catch {
-      // Local revocation still wins: camera and send loop are already stopped.
-    }
+    await postConsentDecision({
+      studentId: studentIdRef.current,
+      sessionId: sessionIdRef.current,
+      studySessionId: studySessionIdRef.current,
+      granted: false,
+      token: getToken(),
+    }).catch(() => {
+      // Local revocation still wins: camera and send loop are already
+      // stopped, and consentGranted is already false in this tab.
+    })
   }, [onConsentChange, stopCamera])
 
+  // Pauses capture only — consent decision is left completely alone, and
+  // the student is not re-prompted next time they press Start.
+  const handleStopCamera = useCallback(() => {
+    setManuallyStopped(true)
+    manuallyStoppedRef.current = true
+    stopCamera()
+  }, [stopCamera])
+
   // Auto-start camera when video plays — ONLY if the student has already
-  // granted consent (CR6). If consent is undecided, the modal below
-  // handles it and calls startCamera() itself via handleConsentDecision.
+  // granted consent (CR6) AND hasn't explicitly pressed Stop Camera this
+  // session. If consent is undecided, the modal below handles it and
+  // calls startCamera() itself via handleConsentDecision.
   useEffect(() => {
-    if (isVideoPlaying && !isActive && !error && consentGranted === true) startCamera()
-  }, [isVideoPlaying, isActive, error, consentGranted, startCamera])
+    if (isVideoPlaying && !isActive && !error && consentGranted === true && !manuallyStopped) {
+      startCamera()
+    }
+  }, [isVideoPlaying, isActive, error, consentGranted, manuallyStopped, startCamera])
 
   const handleConsentDecision = useCallback(
     (granted: boolean) => {
@@ -413,7 +476,13 @@ export default function CameraFeed({
     [isActive, error, onConsentChange, startCamera, stopCamera]
   )
 
-  const handleEnableCameraClick = useCallback(() => {
+  // Start Camera: the modal is shown here only when there's no decision
+  // on file yet for this session_id (consentGranted !== true covers both
+  // "undecided" and "previously declined" — either way we ask, or resume
+  // asking, at most once per session). A prior grant just resumes.
+  const handleStartCamera = useCallback(() => {
+    setManuallyStopped(false)
+    manuallyStoppedRef.current = false
     if (consentGrantedRef.current !== true) {
       setShowConsentPrompt(true)
       return
@@ -421,7 +490,30 @@ export default function CameraFeed({
     startCamera()
   }, [startCamera])
 
-  // Cleanup on unmount
+  // FIX (auto-revoke on session completion / logout): the currently
+  // mounted CameraFeed is the only place that knows student/session ids,
+  // so it registers itself as "the" revocable consent session whenever
+  // consent is granted. video/page.tsx flips `sessionComplete` right
+  // before navigating to the assessment; logout() (lib/auth.tsx) looks
+  // this registration up directly since it runs outside React entirely.
+  useEffect(() => {
+    if (consentGranted === true) {
+      registerActiveConsentRevoke(revokeConsent)
+    } else {
+      registerActiveConsentRevoke(null)
+    }
+    return () => registerActiveConsentRevoke(null)
+  }, [consentGranted, revokeConsent])
+
+  useEffect(() => {
+    if (sessionComplete && consentGrantedRef.current === true) {
+      void revokeConsent()
+    }
+  }, [sessionComplete, revokeConsent])
+
+  // Cleanup on unmount — stop the stream, but do NOT revoke consent.
+  // Unmounting happens on ordinary navigation/refresh too, and consent
+  // must not be silently erased just because the component went away.
   useEffect(() => () => stopCamera(), [stopCamera])
 
   // ══════════════════════════════════════════════════════════
@@ -482,7 +574,9 @@ export default function CameraFeed({
               <CameraOff size={20} className="text-[var(--text-muted)]" />
             </div>
             <p className="text-xs text-[var(--text-muted)]">
-              {isVideoPlaying ? "Starting camera..." : "Camera starts when video plays"}
+              {manuallyStopped
+                ? "Camera stopped. Press Start Camera to resume."
+                : isVideoPlaying ? "Starting camera..." : "Camera starts when video plays"}
             </p>
           </div>
         )}
@@ -491,7 +585,7 @@ export default function CameraFeed({
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-red-500/5 p-4">
             <AlertTriangle size={24} className="text-red-400" />
             <p className="text-xs text-red-400 text-center">{error}</p>
-            <button onClick={startCamera} className="text-xs px-3 py-1 rounded-lg bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-colors mt-1">Retry</button>
+            <button onClick={handleStartCamera} className="text-xs px-3 py-1 rounded-lg bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-colors mt-1">Retry</button>
           </div>
         )}
 
@@ -529,17 +623,33 @@ export default function CameraFeed({
       </div>
 
       {/* Controls */}
-      <div className="p-3 flex gap-2">
-        {!isActive ? (
-          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={handleEnableCameraClick} disabled={isLoading}
-            className="flex-1 px-4 py-2 text-xs font-semibold rounded-xl bg-gradient-to-r from-violet-500 to-purple-600 text-white hover:shadow-lg hover:shadow-violet-500/20 transition-all disabled:opacity-50">
-            {isLoading ? "Starting..." : consentGranted === true ? "Enable Camera" : "Review Camera Consent"}
-          </motion.button>
-        ) : (
-          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={revokeConsent}
-            className="flex-1 px-4 py-2 text-xs font-semibold rounded-xl bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-all">
-            Revoke Camera
-          </motion.button>
+      <div className="p-3 flex flex-col gap-2">
+        <div className="flex gap-2">
+          {!isActive ? (
+            <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={handleStartCamera} disabled={isLoading}
+              className="flex-1 px-4 py-2 text-xs font-semibold rounded-xl bg-gradient-to-r from-violet-500 to-purple-600 text-white hover:shadow-lg hover:shadow-violet-500/20 transition-all disabled:opacity-50">
+              {isLoading ? "Starting..." : consentGranted === true ? "Start Camera" : "Review Camera Consent"}
+            </motion.button>
+          ) : (
+            <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={handleStopCamera}
+              className="flex-1 px-4 py-2 text-xs font-semibold rounded-xl bg-white/10 text-white border border-white/15 hover:bg-white/15 transition-all">
+              Stop Camera
+            </motion.button>
+          )}
+        </div>
+
+        {/* Revoke Consent — a separate, always-available secondary action
+            whenever there's a consent decision to revoke. Distinct from
+            Stop Camera: this also clears the consent record server-side,
+            so the next Start Camera re-prompts. */}
+        {consentGranted === true && (
+          <button
+            onClick={revokeConsent}
+            className="flex items-center justify-center gap-1.5 py-1.5 text-[11px] font-medium text-[var(--text-muted)] hover:text-red-400 transition-colors"
+          >
+            <ShieldOff size={11} />
+            Revoke camera consent
+          </button>
         )}
       </div>
     </motion.div>

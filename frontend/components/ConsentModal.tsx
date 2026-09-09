@@ -15,15 +15,26 @@
  * defaults to a neutral 0.5 when no behavioral-cue data is supplied
  * (backend/ml/crs.py), so opting out only removes a potential *upward*
  * signal, never forces a lower readiness score or an easier/harder tier.
+ *
+ * FIX (A-3, Claude audit): granting consent previously called
+ * onDecision(true) unconditionally in a `finally` block — a network
+ * failure was swallowed by an empty `catch`, and even a non-2xx response
+ * (403/500/etc.) was never checked at all, since `fetch()` doesn't throw
+ * on those. The camera would end up enabled locally with nothing actually
+ * persisted server-side. Consent must fail closed: `onDecision(true)` is
+ * now only called after a confirmed 2xx response. Declining is different
+ * — "camera stays off" is the safe default either way, so a decline is
+ * always applied locally even if persisting it fails (CameraFeed will
+ * simply re-ask next time, which is also safe).
  */
 
 import { useEffect, useState } from "react"
 import { createPortal } from "react-dom"
 import { motion, AnimatePresence } from "framer-motion"
-import { Camera, ShieldCheck, X } from "lucide-react"
+import { Camera, ShieldCheck, X, AlertTriangle } from "lucide-react"
 import { getToken } from "@/lib/auth"
+import { postConsentDecision } from "@/lib/consent"
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api"
 const RETENTION_DAYS = 30
 
 interface ConsentModalProps {
@@ -36,6 +47,7 @@ interface ConsentModalProps {
 export default function ConsentModal({ studentId, sessionId, studySessionId, onDecision }: ConsentModalProps) {
   const [submitting, setSubmitting] = useState(false)
   const [mounted, setMounted] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   useEffect(() => {
     setMounted(true)
@@ -43,30 +55,35 @@ export default function ConsentModal({ studentId, sessionId, studySessionId, onD
 
   const submit = async (granted: boolean) => {
     setSubmitting(true)
-    try {
-      await fetch(`${API_BASE}/attention/consent`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
-        },
-        body: JSON.stringify({
-          student_id: studentId,
-          session_id: sessionId,
-          study_session_id: studySessionId || undefined,
-          granted,
-          retention_days: RETENTION_DAYS,
-          raw_frames_stored: false,
-          version: "1.0",
-        }),
-      })
-    } catch {
-      // If the backend is unreachable, still honor the student's choice
-      // locally — CameraFeed will simply stay off and fall back to the
-      // neutral-behavioral_cue default rather than retry indefinitely.
-    } finally {
-      setSubmitting(false)
-      onDecision(granted)
+    setSaveError(null)
+
+    const persisted = await postConsentDecision({
+      studentId,
+      sessionId,
+      studySessionId,
+      granted,
+      retentionDays: RETENTION_DAYS,
+      token: getToken(),
+    }).catch(() => false)
+
+    setSubmitting(false)
+
+    if (!granted) {
+      // Declining is always safe to apply locally: the camera stays off
+      // either way, whether or not the decline itself was persisted.
+      onDecision(false)
+      return
+    }
+
+    if (persisted) {
+      onDecision(true)
+    } else {
+      // FAIL CLOSED (A-3): a failed grant must NOT enable the camera.
+      // Keep the modal open so the student can retry; onDecision(true)
+      // is deliberately never called here.
+      setSaveError(
+        "We couldn't save your choice. Your camera has not been enabled — check your connection and try again."
+      )
     }
   }
 
@@ -115,13 +132,20 @@ export default function ConsentModal({ studentId, sessionId, studySessionId, onD
             </li>
           </ul>
 
+          {saveError && (
+            <div className="mt-4 flex items-start gap-2 rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-300">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{saveError}</span>
+            </div>
+          )}
+
           <div className="mt-6 flex flex-col gap-2 sm:flex-row-reverse">
             <button
               disabled={submitting}
               onClick={() => submit(true)}
               className="flex-1 rounded-lg bg-indigo-500 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-indigo-400 disabled:opacity-50"
             >
-              Allow camera
+              {submitting ? "Saving..." : saveError ? "Try again" : "Allow camera"}
             </button>
             <button
               disabled={submitting}

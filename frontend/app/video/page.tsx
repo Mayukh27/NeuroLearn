@@ -26,6 +26,7 @@ import {
   type VideoLink,
   type StudySession,
 } from "@/lib/api"
+import { getOrCreateWebcamSessionId } from "@/lib/consent"
 
 export default function VideoPage() {
   return (
@@ -37,13 +38,6 @@ export default function VideoPage() {
       <VideoContent />
     </Suspense>
   )
-}
-
-function newWebcamSessionId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return `webcam_${crypto.randomUUID()}`
-  }
-  return `webcam_${Date.now()}_${Math.random().toString(16).slice(2)}`
 }
 
 function VideoContent() {
@@ -62,9 +56,18 @@ function VideoContent() {
   const [videoEnded, setVideoEnded] = useState(false)
   const [customUrl, setCustomUrl] = useState("")
   const [showCustomInput, setShowCustomInput] = useState(false)
-  const [webcamSessionId, setWebcamSessionId] = useState(() => newWebcamSessionId())
+  // FIX (A-1 / consent-on-navigation): persisted in sessionStorage via
+  // lib/consent.ts so this stays stable across video switches AND across
+  // full page navigation (e.g. to /profile or /dashboard and back) within
+  // one browser session — see getOrCreateWebcamSessionId() for why.
+  const [webcamSessionId] = useState(() => getOrCreateWebcamSessionId())
   const [studySession, setStudySession] = useState<StudySession | null>(null)
   const [behavioralCueGranted, setBehavioralCueGranted] = useState<boolean | null>(null)
+  // FIX (auto-revoke on session completion): flipped true right before
+  // navigating to the assessment. CameraFeed watches this prop and
+  // auto-revokes camera consent once the study session's instructional
+  // segment is over (see lib/consent.ts).
+  const [sessionComplete, setSessionComplete] = useState(false)
   const [completedVideoTranscripts, setCompletedVideoTranscripts] = useState<Record<string, string>>({})
   const [isPreparingAssessment, setIsPreparingAssessment] = useState(false)
 
@@ -200,7 +203,8 @@ function VideoContent() {
     setLatestAttention(null)
     setSessionAvgAttention(0)
     setBehavioralCueGranted(null)
-    setWebcamSessionId(newWebcamSessionId())
+    // FIX (A-1): Do not regenerate webcamSessionId here. Camera consent is
+    // visit/session-level and must survive video switches.
     setCustomUrl("")
     setShowCustomInput(false)
   }, [])
@@ -215,7 +219,7 @@ function VideoContent() {
     setLatestAttention(null)
     setSessionAvgAttention(0)
     setBehavioralCueGranted(null)
-    setWebcamSessionId(newWebcamSessionId())
+    // FIX (A-1): Do not regenerate webcamSessionId here either.
     setShowCustomInput(false)
   }
 
@@ -265,6 +269,7 @@ function VideoContent() {
         behavioral_cue: Math.round(effectiveBehavioralCue).toString(),
         attentionData: JSON.stringify(attentionSummary),
       })
+      setSessionComplete(true)
       router.push(`/assessment?${params.toString()}`)
     } catch (err) {
       console.error("Assessment preparation failed:", err)
@@ -399,6 +404,7 @@ function VideoContent() {
             studentId="student_001"
             sessionId={webcamSessionId}
             studySessionId={studySession?.studySessionId}
+            sessionComplete={sessionComplete}
             onConsentChange={(granted) => {
               setBehavioralCueGranted(granted)
               if (!granted) {

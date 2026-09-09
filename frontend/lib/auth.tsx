@@ -14,6 +14,7 @@
 // ============================================================
 
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react"
+import { revokeActiveConsentIfAny, clearStoredWebcamSessionId } from "@/lib/consent"
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api"
 const TOKEN_KEY = "neurolearn_token"
@@ -199,7 +200,17 @@ export async function fetchMe(): Promise<AuthUser> {
   return normalizeUser(await res.json())
 }
 
-export function logout() {
+export async function logout() {
+  // FIX (auto-revoke at logout): if a CameraFeed with granted consent is
+  // currently mounted, revoke it first — best-effort, capped at ~1.5s so
+  // a slow/unreachable backend never hangs logout (see lib/consent.ts).
+  await revokeActiveConsentIfAny()
+  // The webcam session id is intentionally persisted across navigation
+  // (see getOrCreateWebcamSessionId) so consent isn't re-asked just from
+  // visiting /profile or /dashboard. Logout is one of the three defined
+  // triggers that SHOULD end that session, so clear it here.
+  clearStoredWebcamSessionId()
+
   // FIX (remaining-things request): logout previously only cleared the
   // browser's copy of the token — the token itself stayed valid
   // server-side until natural expiry. This actually revokes the refresh
