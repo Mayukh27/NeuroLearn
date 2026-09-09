@@ -62,7 +62,11 @@ function VideoContent() {
   const [videoEnded, setVideoEnded] = useState(false)
   const [customUrl, setCustomUrl] = useState("")
   const [showCustomInput, setShowCustomInput] = useState(false)
-  const [webcamSessionId, setWebcamSessionId] = useState(() => newWebcamSessionId())
+  // FIX (A-1): generated once per page load/visit and never regenerated —
+  // see handleSelectVideo/handleCustomUrlSubmit below. This is the identity
+  // CameraFeed uses for camera-consent lookup/storage, so it must stay
+  // stable across video switches within one study-session visit.
+  const [webcamSessionId] = useState(() => newWebcamSessionId())
   const [studySession, setStudySession] = useState<StudySession | null>(null)
   const [behavioralCueGranted, setBehavioralCueGranted] = useState<boolean | null>(null)
   const [completedVideoTranscripts, setCompletedVideoTranscripts] = useState<Record<string, string>>({})
@@ -229,7 +233,14 @@ function VideoContent() {
     setLatestAttention(null)
     setSessionAvgAttention(0)
     setBehavioralCueGranted(null)
-    setWebcamSessionId(newWebcamSessionId())
+    // FIX (A-1, mentor audit): webcamSessionId must NOT be regenerated here.
+    // It is the identity CameraFeed uses to look up/persist camera consent
+    // (backend Consent row keyed on student_id + session_id). Regenerating
+    // it on every video switch made every switch look like a brand-new,
+    // never-consented session, so the consent modal reappeared per video
+    // instead of once per study-session visit. Leaving it untouched keeps
+    // it stable — set once per page load in useState below — for the
+    // whole visit, matching one study session = one consent decision.
     setCustomUrl("")
     setShowCustomInput(false)
   }, [])
@@ -244,7 +255,8 @@ function VideoContent() {
     setLatestAttention(null)
     setSessionAvgAttention(0)
     setBehavioralCueGranted(null)
-    setWebcamSessionId(newWebcamSessionId())
+    // FIX (A-1): see handleSelectVideo above — do not regenerate
+    // webcamSessionId here either, for the same reason.
     setShowCustomInput(false)
   }
 
