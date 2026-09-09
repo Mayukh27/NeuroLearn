@@ -52,7 +52,7 @@ function AssessmentContent() {
   const courseTitleParam = searchParams.get("courseTitle") || "Course"
   const videoTitleParam = searchParams.get("videoTitle") || "Video"
   const transcriptParam = searchParams.get("transcript") || ""
-
+  
   const [session, setSession] = useState<AssessmentSession | null>(null)
   const [currentIdx, setCurrentIdx] = useState(0)
   const [answers, setAnswers] = useState<Record<string, string | number>>({})
@@ -68,6 +68,8 @@ function AssessmentContent() {
   const hasFinalizedRef = useRef(false)
   const questionPresentedAtRef = useRef<Record<string, number>>({})
   const responseEventsRef = useRef<QuestionResponseEvent[]>([])
+  const generationStartedRef = useRef(false)
+
 
   // Fetch transcript text from window (set by TranscriptionPanel)
   const getTranscriptText = (): string => {
@@ -81,6 +83,8 @@ function AssessmentContent() {
   // Generate assessment on mount
   useEffect(() => {
   async function generate() {
+    if (generationStartedRef.current) return
+    generationStartedRef.current = true
     setIsLoading(true)
 
     try {
