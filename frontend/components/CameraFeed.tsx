@@ -9,9 +9,18 @@
  *   3. canvas.drawImage(video) → canvas.toDataURL("image/jpeg")
  *   4. POST base64 frame → /api/attention/snapshot
  *   5. Parse response → call onAttentionUpdate(snapshot)
- *   6. If backend down → generate local dummy score
  *
  * Every step is logged to console for debugging.
+ *
+ * FIX (B-1, research fail-closed): this used to fall back to a
+ * Math.random()-based fake score (generateLocalDummy) whenever the
+ * backend was unreachable or the 2s request timed out, and would
+ * display/report that fabricated number as if it were a real
+ * measurement. Research mode must fail closed: if a frame cannot be
+ * scored by the real backend within the request window, that cycle
+ * simply reports nothing — no fabricated score is displayed, and
+ * nothing is written as a research measurement. onAttentionUpdate is
+ * only ever called with a genuine backend response.
  *
  * FIX (start/stop/revoke): "Stop Camera" and "Revoke Consent" used to be
  * the same button/action, so pausing the camera silently erased the
@@ -84,33 +93,6 @@ function normSnap(data: any): AttentionSnapshotResponse {
       headPose: mr.head_pose ?? mr.headPose ?? "forward",
       faceDetected: mr.face_detected ?? mr.faceDetected ?? false,
       blinkRate: mr.blink_rate ?? mr.blinkRate ?? 0,
-    },
-  }
-}
-
-function generateLocalDummy(): AttentionSnapshotResponse {
-  const r = Math.random()
-  const state: "attentive" | "inattentive" | "unfocused" =
-    r > 0.85 ? "unfocused" : r > 0.6 ? "inattentive" : "attentive"
-  const ranges = { attentive: [70, 100], inattentive: [30, 69], unfocused: [0, 29] } as const
-  const [lo, hi] = ranges[state]
-  const score = Math.floor(Math.random() * (hi - lo + 1)) + lo
-  const messages = {
-    attentive: "Great focus! Keep it up.",
-    inattentive: "Try to stay focused on the content.",
-    unfocused: "Your behavioral cue is very low. Take a break?",
-  }
-  return {
-    timestamp: new Date().toISOString(),
-    score,
-    state,
-    confidence: Math.random() * 0.3 + 0.7,
-    message: messages[state],
-    modelResponse: {
-      eyeContact: score / 100,
-      headPose: state === "attentive" ? "forward" : state === "inattentive" ? "slightly_away" : "away",
-      faceDetected: true,
-      blinkRate: Math.round(12 + Math.random() * 10),
     },
   }
 }
@@ -392,19 +374,17 @@ export default function CameraFeed({
             delivered = true
           }
         } catch (e) {
-          // Fetch failed or timed out — fall through
-          console.log("[CameraFeed] Backend unreachable, using local fallback")
+          // Fetch failed or timed out — fail closed. No fabricated score
+          // is generated or displayed; this cycle's measurement is simply
+          // missing (B-1). onAttentionUpdate is not called.
+          console.log("[CameraFeed] Backend unreachable — measurement missing this cycle (fail-closed)")
         }
       }
 
-      // ── Local fallback — always fires if backend didn't respond ──
+      // ── Fail closed: if the real backend did not deliver a scored
+      // response, do NOT synthesize one. Just reflect disconnected state. ──
       if (!delivered && consentGrantedRef.current === true) {
         setIsConnected(false)
-        const dummy = generateLocalDummy()
-        console.log("[CameraFeed] Local dummy: score =", dummy.score, "state =", dummy.state)
-        setFramesSent((p) => p + 1)
-        setLastScore(dummy.score)
-        callbackRef.current?.(dummy)
       }
 
       isSendingRef.current = false

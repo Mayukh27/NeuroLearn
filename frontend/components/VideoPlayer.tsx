@@ -280,6 +280,34 @@ export default function VideoPlayer({
     }
   }, [videoType, videoUrl])
 
+    // ── YouTube currentTime synchronization ──
+  useEffect(() => {
+    if (videoType !== "youtube" || !isPlaying) return
+
+    const interval = window.setInterval(() => {
+      const player = youtubePlayerRef.current
+      const current = player?.getCurrentTime?.()
+      const dur = player?.getDuration?.()
+      
+      if (
+        typeof current !== "number" ||
+        !Number.isFinite(current) ||
+        typeof dur !== "number" ||
+        !Number.isFinite(dur) ||
+        dur <= 0
+      ) {
+        return
+      }
+
+      setCurrentTime(current)
+      setDuration(dur)
+      setProgress((current / dur) * 100)
+      onTimeUpdateRef.current?.(current, dur)
+    }, 500)
+
+    return () => window.clearInterval(interval)
+  }, [videoType, isPlaying])
+
   const togglePlay = useCallback(() => {
     if (videoType === "mp4") {
       const video = videoRef.current

@@ -223,7 +223,10 @@ class AttentionDetector:
 
         # ── If ML not available, return dummy ──
         if not ML_AVAILABLE or self.face_mesh is None:
-            return self._generate_dummy_snapshot(timestamp)
+            raise RuntimeError(
+        "Behavioral-cue detector unavailable; refusing to generate "
+        "a synthetic research measurement."
+    )
 
         # ── Decode frame ──
         frame = self.decode_frame(frame_base64)
