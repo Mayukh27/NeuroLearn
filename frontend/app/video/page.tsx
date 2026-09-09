@@ -62,26 +62,22 @@ function VideoContent() {
   const [videoEnded, setVideoEnded] = useState(false)
   const [customUrl, setCustomUrl] = useState("")
   const [showCustomInput, setShowCustomInput] = useState(false)
-  const [webcamSessionId, setWebcamSessionId] = useState(() => newWebcamSessionId())
+  // FIX (A-1): generated once per page load/visit and never regenerated.
+  // CameraFeed uses this value for camera-consent lookup/storage, so it must
+  // stay stable across video switches within one study-session visit.
+  const [webcamSessionId] = useState(() => newWebcamSessionId())
   const [studySession, setStudySession] = useState<StudySession | null>(null)
   const [behavioralCueGranted, setBehavioralCueGranted] = useState<boolean | null>(null)
   const [completedVideoTranscripts, setCompletedVideoTranscripts] = useState<Record<string, string>>({})
   const [isPreparingAssessment, setIsPreparingAssessment] = useState(false)
 
-  // FIX: ref always holds the current session ID so handleVideoEnd (a
-  // useCallback) never reads a stale null from its closure snapshot, even
-  // when the video ends in the same render cycle that created the session.
   const studySessionIdRef = useRef<string | null>(null)
   useEffect(() => {
     studySessionIdRef.current = studySession?.studySessionId ?? null
   }, [studySession?.studySessionId])
 
-  // FIX: track which course already has a session so switching videos on the
-  // same course never starts a second session (the log shows multiple
-  // POST /api/research/study-sessions calls — one per video switch).
   const sessionCreatedForCourseRef = useRef<string | null>(null)
 
-  // Behavioral Cue state
   const [latestAttention, setLatestAttention] = useState<AttentionSnapshotResponse | null>(null)
   const [attentionHistory, setAttentionHistory] = useState<number[]>([])
   const [sessionAvgAttention, setSessionAvgAttention] = useState(0)
@@ -92,7 +88,6 @@ function VideoContent() {
     ? 50
     : sessionAvgAttention
 
-  // Load course
   useEffect(() => {
     async function load() {
       setIsLoading(true)
@@ -138,12 +133,6 @@ function VideoContent() {
       })
       return
     }
-    // FIX: only create ONE session per course load. Previously this effect
-    // depended on selectedVideo?.id, so switching from Video 1 to Video 2
-    // fired startStudySession again — creating a second session. The server
-    // logs confirm this: multiple POST /api/research/study-sessions 200 OK
-    // appear for the same page visit. Each new session has no completions,
-    // so assessment/generate always returns 409.
     if (sessionCreatedForCourseRef.current === course.id) return
     sessionCreatedForCourseRef.current = course.id
 
@@ -154,7 +143,7 @@ function VideoContent() {
         if (!cancelled) setStudySession(session)
       } catch (err) {
         console.error("Failed to start study session:", err)
-        sessionCreatedForCourseRef.current = null  // allow retry on next render
+        sessionCreatedForCourseRef.current = null
         if (!cancelled) setStudySession(null)
       }
     })()
@@ -185,35 +174,20 @@ function VideoContent() {
         ...prev,
         [completedVideoId]: transcriptText,
       }))
-      // FIX: read session ID from ref, not from the closure snapshot.
-      // Previously handleVideoEnd depended on studySession?.studySessionId in
-      // its dep array. React creates the callback BEFORE the state update
-      // propagates, so when the video ends during the same render cycle that
-      // the session was set, the captured value can still be null — silently
-      // skipping completeStudyVideo with no error. The ref always holds the
-      // latest value, avoiding this stale-closure race entirely.
       const sessionId = studySessionIdRef.current
       if (sessionId) {
         void completeStudyVideo(sessionId, completedVideoId, transcriptText)
           .catch((err) => console.error("Failed to record completed video:", err))
       } else {
-        // Session not ready — this should now be rare with the one-session
-        // guard above, but log it if it happens so it's visible.
         console.warn("[VideoEnd] study session not yet ready; completion will be recovered by the backend auto-record on assessment generation.", completedVideoId)
       }
     }
-  // studySession?.studySessionId intentionally removed from dep array —
-  // we use the ref above. Removing it keeps handleVideoEnd stable across
-  // renders so VideoPlayer's YouTube message listener is NOT re-registered
-  // on every session-ID change (which was causing duplicate ENDED handling).
   }, [customUrl, selectedVideo?.id])
 
-  // FIXED: Use functional updates — no stale closure on attentionHistory
   const handleAttentionUpdate = useCallback((snapshot: AttentionSnapshotResponse) => {
     setLatestAttention(snapshot)
     setAttentionHistory((prev) => {
       const next = [...prev, snapshot.score].slice(-60)
-      // Compute avg inside the same update
       const avg = next.reduce((a, b) => a + b, 0) / next.length
       setSessionAvgAttention(avg)
       return next
@@ -229,7 +203,8 @@ function VideoContent() {
     setLatestAttention(null)
     setSessionAvgAttention(0)
     setBehavioralCueGranted(null)
-    setWebcamSessionId(newWebcamSessionId())
+    // FIX (A-1): Do not regenerate webcamSessionId here. Camera consent is
+    // visit/session-level and must survive video switches.
     setCustomUrl("")
     setShowCustomInput(false)
   }, [])
@@ -244,7 +219,7 @@ function VideoContent() {
     setLatestAttention(null)
     setSessionAvgAttention(0)
     setBehavioralCueGranted(null)
-    setWebcamSessionId(newWebcamSessionId())
+    // FIX (A-1): Do not regenerate webcamSessionId here either.
     setShowCustomInput(false)
   }
 
@@ -268,36 +243,33 @@ function VideoContent() {
         throw new Error("Complete a video before starting the assessment.")
       }
 
-      // The backend derives the assessment context exclusively from these
-      // completion records.  Replaying all entries is safe and preserves the
-      // original completion order on the server.
       await Promise.all(
         Object.entries(transcriptsToPersist).map(([videoId, transcriptText]) =>
           completeStudyVideo(studySession.studySessionId, videoId, transcriptText)
         )
       )
-    // Build behavioral_cue summary to thread through to report card
-    const attentionSummary = {
-      avgScore: Math.round(effectiveBehavioralCue * 10) / 10,
-      scoreHistory: attentionHistory.slice(-40),
-      totalSnapshots: attentionHistory.length,
-      attentivePercent: Math.round((attentionHistory.filter(s => s >= 65).length / Math.max(attentionHistory.length, 1)) * 100),
-      inattentivePercent: Math.round((attentionHistory.filter(s => s >= 30 && s < 65).length / Math.max(attentionHistory.length, 1)) * 100),
-      unfocusedPercent: Math.round((attentionHistory.filter(s => s < 30).length / Math.max(attentionHistory.length, 1)) * 100),
-      avgEyeContact: behavioralCueGranted === false ? 0.5 : latestAttention?.modelResponse?.eyeContact ?? 0.8,
-      avgBlinkRate: behavioralCueGranted === false ? 0 : latestAttention?.modelResponse?.blinkRate ?? 16,
-    }
-    const params = new URLSearchParams({
-      videos: Object.keys(transcriptsToPersist).join(","),
-      course: course?.id || "custom",
-      video: selectedVideo?.id || "custom",
-      studySession: studySession.studySessionId,
-      courseTitle: course?.title || "Custom Video",
-      videoTitle: selectedVideo?.title || "Video Session",
-      behavioral_cue: Math.round(effectiveBehavioralCue).toString(),
-      attentionData: JSON.stringify(attentionSummary),
-    })
-    router.push(`/assessment?${params.toString()}`)
+
+      const attentionSummary = {
+        avgScore: Math.round(effectiveBehavioralCue * 10) / 10,
+        scoreHistory: attentionHistory.slice(-40),
+        totalSnapshots: attentionHistory.length,
+        attentivePercent: Math.round((attentionHistory.filter(s => s >= 65).length / Math.max(attentionHistory.length, 1)) * 100),
+        inattentivePercent: Math.round((attentionHistory.filter(s => s >= 30 && s < 65).length / Math.max(attentionHistory.length, 1)) * 100),
+        unfocusedPercent: Math.round((attentionHistory.filter(s => s < 30).length / Math.max(attentionHistory.length, 1)) * 100),
+        avgEyeContact: behavioralCueGranted === false ? 0.5 : latestAttention?.modelResponse?.eyeContact ?? 0.8,
+        avgBlinkRate: behavioralCueGranted === false ? 0 : latestAttention?.modelResponse?.blinkRate ?? 16,
+      }
+      const params = new URLSearchParams({
+        videos: Object.keys(transcriptsToPersist).join(","),
+        course: course?.id || "custom",
+        video: selectedVideo?.id || "custom",
+        studySession: studySession.studySessionId,
+        courseTitle: course?.title || "Custom Video",
+        videoTitle: selectedVideo?.title || "Video Session",
+        behavioral_cue: Math.round(effectiveBehavioralCue).toString(),
+        attentionData: JSON.stringify(attentionSummary),
+      })
+      router.push(`/assessment?${params.toString()}`)
     } catch (err) {
       console.error("Assessment preparation failed:", err)
     } finally {
@@ -315,7 +287,6 @@ function VideoContent() {
 
   return (
     <div className="p-4 md:p-6 max-w-[1500px] mx-auto">
-      {/* Header */}
       <motion.div initial={{ opacity: 0, y: -15 }} animate={{ opacity: 1, y: 0 }} className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={() => router.push("/dashboard")}
@@ -333,7 +304,6 @@ function VideoContent() {
         </motion.button>
       </motion.div>
 
-      {/* Custom URL input */}
       <AnimatePresence>
         {showCustomInput && (
           <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="mb-6 overflow-hidden">
@@ -352,16 +322,13 @@ function VideoContent() {
         )}
       </AnimatePresence>
 
-      {/* Main 3-column layout */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-        {/* Left: Video list */}
         <div className="lg:col-span-3 order-2 lg:order-1">
           {course && (
             <VideoLinkSelector videos={course.videoLinks || []} activeVideoId={selectedVideo?.id || null} onSelect={handleSelectVideo} courseTitle={course.title} />
           )}
         </div>
 
-        {/* Center: Video player */}
         <div className="lg:col-span-6 space-y-5 order-1 lg:order-2">
           {effectiveUrl ? (
             <VideoPlayer videoUrl={effectiveUrl} title={effectiveTitle} onTimeUpdate={handleTimeUpdate} onPlayStateChange={handlePlayStateChange} onVideoEnd={handleVideoEnd} />
@@ -372,7 +339,6 @@ function VideoContent() {
             </div>
           )}
 
-          {/* Video ended → Assessment CTA */}
           <AnimatePresence>
             {videoEnded && (
               <motion.div initial={{ opacity: 0, y: 20, scale: 0.95 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: -10 }}
@@ -384,8 +350,7 @@ function VideoContent() {
                   <div className="flex-1">
                     <h3 className="text-base font-bold text-[var(--text-primary)] mb-1">Ready for Assessment!</h3>
                     <p className="text-xs text-[var(--text-muted)] mb-3">
-                      Your average behavioral-cue score was{" "}
-                      <span className="font-bold text-violet-400">{Math.round(effectiveBehavioralCue)}%</span>.
+                      Your average behavioral-cue score was <span className="font-bold text-violet-400">{Math.round(effectiveBehavioralCue)}%</span>.
                       Based on this and the video content, we&apos;ll generate a personalized quiz.
                     </p>
                     <div className="flex items-center gap-3">
@@ -418,7 +383,6 @@ function VideoContent() {
             )}
           </AnimatePresence>
 
-          {/* Inline behavioral_cue alert during playback */}
           <AnimatePresence>
             {isPlaying && latestAttention && latestAttention.state !== "attentive" && (
               <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}
@@ -432,7 +396,6 @@ function VideoContent() {
           </AnimatePresence>
         </div>
 
-        {/* Right: Camera + Behavioral Cue + Transcription */}
         <div className="lg:col-span-3 space-y-4 order-3">
           <CameraFeed
             isVideoPlaying={isPlaying}
