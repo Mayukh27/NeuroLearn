@@ -32,6 +32,7 @@ from data.models_orm import (
     ResearchParticipant, StudySession, QuestionResponse, ResearchCRSDecision,
     ResearchLegacyDecision,
     BehavioralSummary, PrePostResult, GeneratedQuestion, StudyVideoCompletion,
+    VideoTranscriptCache,
 )
 
 XP_PER_LEVEL = 100
@@ -403,6 +404,48 @@ def get_completed_video_behavioral_score(study_session_id: str) -> float:
         ).scalars().all()
         scores = [float(log.score) for log in logs if log.video_id in completed_ids and log.score is not None]
         return sum(scores) / len(scores) if scores else 50.0
+    finally:
+        db.close()
+
+
+# ── Persistent video transcript cache ──────────────────────
+# Global, video_url-keyed cache of real Whisper transcripts (see
+# ml/transcription_model.py), separate from StudyVideoCompletion above:
+# StudyVideoCompletion.transcript_text is the session-scoped record of
+# what a specific student watched/completed in a specific study session;
+# this table is a single, session-independent row per video_url so the
+# same educational video isn't re-downloaded/re-transcribed every time a
+# different student (or a restarted backend) needs it again.
+
+def get_cached_video_transcript(video_url: str) -> Optional[list[dict]]:
+    """Look up a persisted real transcript by video URL.
+
+    Returns the exact segment list previously saved by
+    save_video_transcript (same shape produced by Faster-Whisper: id,
+    text, timestamp, start_time, end_time, confidence, model_response),
+    or None if this video has never been successfully transcribed and
+    persisted before.
+    """
+    db = _session()
+    try:
+        row = db.get(VideoTranscriptCache, video_url)
+        if not row or not row.segments:
+            return None
+        return row.segments
+    finally:
+        db.close()
+
+
+def save_video_transcript(video_url: str, segments: list[dict]) -> None:
+    """Persist a successfully-produced real transcript so it survives a
+    backend restart. Upserts on video_url (the primary key), so calling
+    this more than once for the same video updates the one existing row
+    rather than creating a duplicate.
+    """
+    db = _session()
+    try:
+        db.merge(VideoTranscriptCache(video_url=video_url, segments=segments))
+        db.commit()
     finally:
         db.close()
 

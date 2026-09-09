@@ -8,11 +8,41 @@ Endpoints:
 ============================================================
 """
 
+import functools
+
+import anyio
 from fastapi import APIRouter, Query
+from starlette.concurrency import run_in_threadpool
 from schemas.models import TranscriptSegment, TranscriptionRequest
 from ml import transcription_service
 
 router = APIRouter(prefix="/api/transcription", tags=["Transcription"])
+
+
+async def _run_detached(func, *args, **kwargs):
+    """Run a blocking call (yt-dlp + FFmpeg + Faster-Whisper) in a worker
+    thread, the same way run_in_threadpool does, but with `cancellable=True`.
+
+    FIX (shutdown hang): run_in_threadpool's default (`cancellable=False`)
+    means that if the request's asyncio task is cancelled — e.g. uvicorn
+    cancelling in-flight request tasks on shutdown — the `await` still
+    blocks until the worker thread finishes, no matter how long that takes.
+    For a multi-minute Whisper job, that's exactly what produced the
+    Ctrl+C hang ("Waiting for connections to close." / "ASGI 'lifespan'
+    protocol appears unsupported."), since the server could never actually
+    finish shutting down while this request stayed in flight.
+    `cancellable=True` lets the `await` return immediately on cancellation
+    instead, so the request task — and therefore the server shutdown — is
+    no longer blocked. The worker thread itself is a daemon thread and
+    keeps running the yt-dlp/FFmpeg/Whisper job independently in the
+    background (its eventual result is simply not awaited anymore); it
+    still populates the existing in-memory transcript cache and releases
+    the existing per-video lock exactly as before, so normal (non-shutdown)
+    behavior — including per-video locking and CUDA/CPU handling inside
+    the model — is completely unchanged.
+    """
+    call = functools.partial(func, *args, **kwargs)
+    return await anyio.to_thread.run_sync(call, cancellable=True)
 
 
 @router.get("/{video_id}", response_model=list[TranscriptSegment])
@@ -20,7 +50,11 @@ async def get_full_transcript(
     video_id: str,
     video_url: str = Query(...),
 ):
-    return transcription_service.get_full_transcript(
+    # run off the event loop (see _run_detached) so this request neither
+    # blocks other API requests while running, nor blocks server shutdown
+    # if it's still in flight when the server stops.
+    return await _run_detached(
+        transcription_service.get_full_transcript,
         video_id,
         video_url=video_url,
     )
@@ -35,7 +69,11 @@ async def get_live_segment(
     Get the transcript segment at a specific video timestamp.
     Used for live sync — frontend polls this as video plays.
     """
-    segment = transcription_service.get_segment_at_time(
+    # Same reasoning as get_full_transcript above — the first poll for a
+    # given video can trigger the same long transcribe job
+    # (transcription_service.get_segment_at_time -> transcribe_video_url).
+    segment = await _run_detached(
+        transcription_service.get_segment_at_time,
         current_time,
         video_url=video_url,
     )
@@ -65,13 +103,21 @@ async def transcribe_audio_chunk(request: TranscriptionRequest):
     Falls back to dummy data if Whisper not installed.
     """
     if request.audio_chunk_base64:
-        segments = transcription_service.transcribe_audio_chunk(
-            request.audio_chunk_base64
+        # Bounded, single-chunk work — not the long-running whole-video
+        # job, so it keeps the existing run_in_threadpool behavior.
+        segments = await run_in_threadpool(
+            transcription_service.transcribe_audio_chunk,
+            request.audio_chunk_base64,
         )
         return {"video_id": request.video_id, "segments": segments}
 
     if request.video_url:
-        segments = transcription_service.transcribe_video_url(request.video_url)
+        # This path runs the same long-running whole-video job as the
+        # endpoints above, so it needs the same detachable execution.
+        segments = await _run_detached(
+            transcription_service.transcribe_video_url,
+            request.video_url,
+        )
         return {"video_id": request.video_id, "segments": segments}
 
     return {"error": "Provide either audio_chunk_base64 or video_url"}

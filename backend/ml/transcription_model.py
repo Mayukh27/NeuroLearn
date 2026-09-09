@@ -2,6 +2,7 @@ import os
 import base64
 import subprocess
 import tempfile
+import threading
 import uuid
 from typing import Optional
 
@@ -105,6 +106,15 @@ class TranscriptionService:
         # Cache: video URL -> real Whisper transcript
         self._video_transcripts: dict[str, list[dict]] = {}
 
+        # FIX: per-video-URL locks so concurrent requests for the SAME
+        # video (e.g. the full-transcript fetch and the live-segment poll
+        # both firing once playback starts) coalesce into one actual
+        # yt-dlp+FFmpeg+Whisper job instead of running it twice in
+        # parallel. `_locks_guard` only protects creating/looking up the
+        # per-video lock itself, not the transcription work.
+        self._transcription_locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
         if WHISPER_AVAILABLE:
             try:
                 logger.info(f"Loading Whisper model: {model_size}")
@@ -125,160 +135,235 @@ class TranscriptionService:
     # REAL VIDEO TRANSCRIPTION
     # ============================================================
 
+    def _get_lock_for_video(self, video_url: str) -> threading.Lock:
+        with self._locks_guard:
+            lock = self._transcription_locks.get(video_url)
+            if lock is None:
+                lock = threading.Lock()
+                self._transcription_locks[video_url] = lock
+            return lock
+
+    def _load_from_database_cache(self, video_url: str) -> Optional[list[dict]]:
+        """Look up a persisted transcript in Postgres (data/database.py's
+        video_transcript_cache table). Never raises — a DB hiccup here
+        should fall through to a fresh transcription, not break the
+        request. Imported lazily to avoid ml/ importing data/ at module
+        load time for anything other than this optional lookup.
+        """
+        try:
+            from data.database import get_cached_video_transcript
+            return get_cached_video_transcript(video_url)
+        except Exception:
+            logger.exception(f"Database transcript lookup failed for video: {video_url}")
+            return None
+
+    def _save_to_database_cache(self, video_url: str, segments: list[dict]) -> None:
+        """Persist a successfully-produced real transcript so it survives a
+        backend restart. Never raises — if this fails, the in-memory cache
+        set by the caller just before this call still serves this process
+        for its remaining lifetime; only cross-restart persistence is lost,
+        not the transcript this request already produced.
+        """
+        try:
+            from data.database import save_video_transcript
+            save_video_transcript(video_url, segments)
+            logger.info(f"Saved transcript to persistent database cache: {video_url}")
+        except Exception:
+            logger.exception(f"Failed to persist transcript to database for video: {video_url}")
+
     def transcribe_video_url(self, video_url: str) -> list[dict]:
         """
         Download audio from a video URL using yt-dlp + FFmpeg,
         then transcribe it with Faster-Whisper.
 
-        Results are cached in memory for the lifetime of the backend.
+        Cache lookup order: in-memory cache -> persistent database cache
+        -> actual yt-dlp/FFmpeg/Whisper transcription. A successful real
+        transcript is written to both the in-memory cache and the
+        database (data/database.py's video_transcript_cache table) so it
+        survives a backend restart; a dummy/failed transcript is never
+        persisted to the database (see the except blocks below).
+
+        FIX: this is a long-running, blocking call, so callers must run it
+        via run_in_threadpool (see routers/transcription.py) rather than
+        awaiting it directly on the event loop. If a job for this exact
+        video_url is already in progress (e.g. the full-transcript request
+        and the live-segment poll both fired once playback started), a
+        second caller waits on the same per-video lock and then reuses the
+        result from cache instead of starting a second yt-dlp/FFmpeg/
+        Whisper run.
         """
 
         if video_url in self._video_transcripts:
-            logger.info(f"Using cached transcript for video: {video_url}")
+            logger.info(f"Using cached transcript from memory for video: {video_url}")
             return self._video_transcripts[video_url]
 
-        if not WHISPER_AVAILABLE or self.model is None:
-            logger.warning("Whisper unavailable — returning dummy transcript")
-            return self._get_dummy_segments()
+        lock = self._get_lock_for_video(video_url)
+        with lock:
+            # Re-check memory cache: another thread may have just finished
+            # this exact job (memory + database) while we were waiting for
+            # the lock above.
+            if video_url in self._video_transcripts:
+                logger.info(f"Using cached transcript from memory for video (job completed while waiting): {video_url}")
+                return self._video_transcripts[video_url]
 
-        audio_path = None
+            # Database cache: survives backend restarts. Only checked once
+            # per video per process, since a hit is loaded straight into
+            # the in-memory cache above for every call after this one.
+            db_segments = self._load_from_database_cache(video_url)
+            if db_segments:
+                logger.info(f"Using cached transcript from database for video: {video_url}")
+                self._video_transcripts[video_url] = db_segments
+                return db_segments
 
-        try:
-            with tempfile.TemporaryDirectory() as temp_dir:
+            if not WHISPER_AVAILABLE or self.model is None:
+                logger.warning("Whisper unavailable — returning dummy transcript")
+                return self._get_dummy_segments()
 
-                output_template = os.path.join(
-                    temp_dir,
-                    "audio.%(ext)s",
-                )
+            audio_path = None
 
-                logger.info(f"Downloading video audio with yt-dlp: {video_url}")
+            try:
+                with tempfile.TemporaryDirectory() as temp_dir:
 
-                subprocess.run(
-                    [
-                        "yt-dlp",
-                         "--js-runtimes", "deno",
-                        "-f",
-                        "140/bestaudio[ext=m4a]/bestaudio",
-                        "--no-playlist",
-                        "-o",
-                        output_template,
-                        video_url,
-                    ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-
-                # Locate downloaded media
-                downloaded_files = [
-                    os.path.join(temp_dir, name) for name in os.listdir(temp_dir)
-                ]
-
-                if not downloaded_files:
-                    raise RuntimeError("yt-dlp did not produce an audio file")
-
-                source_path = downloaded_files[0]
-
-                # Convert to WAV/PCM using FFmpeg
-                audio_path = os.path.join(
-                    temp_dir,
-                    "audio.wav",
-                )
-
-                logger.info("Converting downloaded audio to WAV with FFmpeg")
-
-                subprocess.run(
-                    [
-                        "ffmpeg",
-                        "-y",
-                        "-i",
-                        source_path,
-                        "-vn",
-                        "-ac",
-                        "1",
-                        "-ar",
-                        "16000",
-                        "-sample_fmt",
-                        "s16",
-                        audio_path,
-                    ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-
-                logger.info("Running Faster-Whisper transcription")
-
-                segments_generator, info = self.model.transcribe(
-                    audio_path,
-                    word_timestamps=True,
-                    language="en",
-                )
-
-                segments = []
-
-                for seg in segments_generator:
-
-                    words = []
-
-                    if seg.words:
-                        for word in seg.words:
-                            words.append(
-                                {
-                                    "word": word.word.strip(),
-                                    "start": round(word.start, 2),
-                                    "end": round(word.end, 2),
-                                    "confidence": round(
-                                        word.probability or 0.0,
-                                        3,
-                                    ),
-                                }
-                            )
-
-                    segments.append(
-                        {
-                            "id": f"t_{uuid.uuid4().hex[:8]}",
-                            "text": seg.text.strip(),
-                            "timestamp": self._format_timestamp(seg.start),
-                            "start_time": round(seg.start, 2),
-                            "end_time": round(seg.end, 2),
-                            "confidence": round(
-                                getattr(
-                                    info,
-                                    "language_probability",
-                                    0.0,
-                                ),
-                                3,
-                            ),
-                            "model_response": {
-                                "language": getattr(
-                                    info,
-                                    "language",
-                                    "en",
-                                ),
-                                "words": words,
-                            },
-                        }
+                    output_template = os.path.join(
+                        temp_dir,
+                        "audio.%(ext)s",
                     )
 
-                if not segments:
-                    raise RuntimeError("Faster-Whisper returned no transcript segments")
+                    logger.info(f"Downloading video audio with yt-dlp: {video_url}")
 
-                self._video_transcripts[video_url] = segments
+                    subprocess.run(
+                        [
+                            "yt-dlp",
+                             "--js-runtimes", "deno",
+                            "-f",
+                            "140/bestaudio[ext=m4a]/bestaudio",
+                            "--no-playlist",
+                            "-o",
+                            output_template,
+                            video_url,
+                        ],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
 
-                logger.success(
-                    f"Transcription complete: " f"{len(segments)} real segments"
-                )
+                    # Locate downloaded media
+                    downloaded_files = [
+                        os.path.join(temp_dir, name) for name in os.listdir(temp_dir)
+                    ]
 
-                return segments
+                    if not downloaded_files:
+                        raise RuntimeError("yt-dlp did not produce an audio file")
 
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Media processing failed: {e.stderr}")
-            return self._get_dummy_segments()
+                    source_path = downloaded_files[0]
 
-        except Exception as e:
-            logger.error(f"Video transcription failed: {e}")
-            return self._get_dummy_segments()
+                    # Convert to WAV/PCM using FFmpeg
+                    audio_path = os.path.join(
+                        temp_dir,
+                        "audio.wav",
+                    )
+
+                    logger.info("Converting downloaded audio to WAV with FFmpeg")
+
+                    subprocess.run(
+                        [
+                            "ffmpeg",
+                            "-y",
+                            "-i",
+                            source_path,
+                            "-vn",
+                            "-ac",
+                            "1",
+                            "-ar",
+                            "16000",
+                            "-sample_fmt",
+                            "s16",
+                            audio_path,
+                        ],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+
+                    logger.info("Running Faster-Whisper transcription")
+
+                    segments_generator, info = self.model.transcribe(
+                        audio_path,
+                        word_timestamps=True,
+                        language="en",
+                    )
+
+                    segments = []
+
+                    for seg in segments_generator:
+
+                        words = []
+
+                        if seg.words:
+                            for word in seg.words:
+                                words.append(
+                                    {
+                                        "word": word.word.strip(),
+                                        "start": round(word.start, 2),
+                                        "end": round(word.end, 2),
+                                        "confidence": round(
+                                            word.probability or 0.0,
+                                            3,
+                                        ),
+                                    }
+                                )
+
+                        segments.append(
+                            {
+                                "id": f"t_{uuid.uuid4().hex[:8]}",
+                                "text": seg.text.strip(),
+                                "timestamp": self._format_timestamp(seg.start),
+                                "start_time": round(seg.start, 2),
+                                "end_time": round(seg.end, 2),
+                                "confidence": round(
+                                    getattr(
+                                        info,
+                                        "language_probability",
+                                        0.0,
+                                    ),
+                                    3,
+                                ),
+                                "model_response": {
+                                    "language": getattr(
+                                        info,
+                                        "language",
+                                        "en",
+                                    ),
+                                    "words": words,
+                                },
+                            }
+                        )
+
+                    if not segments:
+                        raise RuntimeError("Faster-Whisper returned no transcript segments")
+
+                    self._video_transcripts[video_url] = segments
+
+                    logger.success(
+                        f"Transcription complete: " f"{len(segments)} real segments"
+                    )
+
+                    # Persist the successful real transcript so it survives
+                    # a backend restart. This only runs after `segments` is
+                    # built successfully above — a dummy/failed transcript
+                    # (returned from the except blocks below) never reaches
+                    # this line, so it can never poison the database cache.
+                    self._save_to_database_cache(video_url, segments)
+
+                    return segments
+
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Media processing failed: {e.stderr}")
+                return self._get_dummy_segments()
+
+            except Exception as e:
+                logger.error(f"Video transcription failed: {e}")
+                return self._get_dummy_segments()
 
     # ============================================================
     # AUDIO CHUNK TRANSCRIPTION

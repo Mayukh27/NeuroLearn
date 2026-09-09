@@ -248,6 +248,24 @@ class StudyVideoCompletion(Base):
     )
 
 
+class VideoTranscriptCache(Base):
+    """Persistent Whisper-transcript cache, keyed by video URL, so a video
+    already transcribed once is never re-downloaded/re-run through
+    yt-dlp/FFmpeg/Whisper after a backend restart.
+
+    Deliberately separate from StudyVideoCompletion.transcript_text (the
+    per-session, per-student audit trail of what was completed *within one
+    study session*): the same educational video can be watched across many
+    different study sessions/students, so this table is a single global
+    row per video_url, independent of any study session. Nothing about
+    StudyVideoCompletion's schema or semantics changes.
+    """
+    __tablename__ = "video_transcript_cache"
+    video_url = Column(String, primary_key=True)
+    segments = Column(JSONB, nullable=False, default=list)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class QuestionResponse(Base):
     __tablename__ = "question_responses"
     id = Column(String, primary_key=True, default=_uuid)

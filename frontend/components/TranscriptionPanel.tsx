@@ -52,25 +52,47 @@ export default function TranscriptionPanel({
   const [autoScroll, setAutoScroll] = useState(true)
   const scrollRef = useRef<HTMLDivElement>(null)
   const lastFetchTime = useRef<number>(-1)
+  // Tracks which video IDs have already had a transcription request fired
+  // during this page/session flow, so playing/pausing/re-playing the same
+  // video (or re-rendering) never fires it more than once.
+  const transcriptionTriggeredFor = useRef<Set<string>>(new Set())
 
-  // ── Fetch full transcript on mount ──
+  // Selecting/loading/navigating to a video must not trigger transcription
+  // — only clear the previously-shown transcript so the panel doesn't keep
+  // displaying the last video's segments while nothing has been requested
+  // for the new one yet.
   useEffect(() => {
+    setSegments([])
+    setActiveSegmentId(null)
+    setIsConnected(false)
+    lastFetchTime.current = -1
+  }, [videoId])
+
+  // ── Fetch full transcript only once actual playback starts ──
+  // Requirement: transcription must start on the first real play event for
+  // this video, not merely because it was selected/loaded/displayed, and
+  // at most once per video during this page/session flow.
+  useEffect(() => {
+    if (!isPlaying) return
+    if (transcriptionTriggeredFor.current.has(videoId)) return
+    transcriptionTriggeredFor.current.add(videoId)
+
     async function fetchFullTranscript() {
       try {
-        const res = await fetch( `${API_BASE}/transcription/${videoId}?video_url=${encodeURIComponent(videoUrl)}` )
+        const res = await fetch(`${API_BASE}/transcription/${videoId}?video_url=${encodeURIComponent(videoUrl)}`)
         if (res.ok) {
           const data = await res.json()
           setSegments(data)
           setIsConnected(true)
           return
         }
-      } catch {}
+      } catch { }
       // Fallback to dummy
       setSegments(DUMMY_SEGMENTS)
       setIsConnected(false)
     }
     fetchFullTranscript()
-  }, [videoId, videoUrl])
+  }, [isPlaying, videoId, videoUrl])
 
   // ── Poll live segment as video plays ──
   useEffect(() => {
@@ -92,23 +114,29 @@ export default function TranscriptionPanel({
 
     // Also try fetching live from backend (to get new segments)
     async function fetchLive() {
-  try {
-    const res = await fetch(
-      `${API_BASE}/transcription/${videoId}/live?current_time=${currentTime}&video_url=${encodeURIComponent(videoUrl)}`
-    )
-    if (res.ok) {
-      const data = await res.json()
-      if (data.id && !segments.find((s) => s.id === data.id)) {
-        setSegments((prev) =>
-          [...prev, data].sort((a, b) => a.start_time - b.start_time)
+      try {
+        const res = await fetch(
+          `${API_BASE}/transcription/${videoId}/live?current_time=${currentTime}&video_url=${encodeURIComponent(videoUrl)}`
         )
+        if (res.ok) {
+          const data = await res.json()
+          if (data.id) {
+            setSegments((prev) => {
+              if (prev.some((s) => s.id === data.id)) {
+                return prev
+              }
+
+              return [...prev, data].sort(
+                (a, b) => a.start_time - b.start_time
+              )
+            })
+          }
+          setIsConnected(true)
+        }
+      } catch {
+        setIsConnected(false)
       }
-      setIsConnected(true)
     }
-  } catch {
-    setIsConnected(false)
-  }
-}
 
     fetchLive()
   }, [currentTime, isPlaying, videoId, videoUrl, segments])
@@ -189,20 +217,18 @@ export default function TranscriptionPanel({
                   initial={{ opacity: 0, x: -15 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: idx * 0.03 }}
-                  className={`flex gap-2.5 items-start p-2.5 rounded-xl transition-all duration-300 ${
-                    isActive
+                  className={`flex gap-2.5 items-start p-2.5 rounded-xl transition-all duration-300 ${isActive
                       ? "bg-violet-500/10 border border-violet-500/20"
                       : isPast
                         ? "bg-[var(--bg-elevated)]/50 opacity-60"
                         : "bg-[var(--bg-elevated)] border border-transparent"
-                  }`}
+                    }`}
                 >
                   {/* Timestamp */}
                   <div className="flex flex-col items-center shrink-0 pt-0.5">
                     <span
-                      className={`text-[10px] font-mono ${
-                        isActive ? "text-violet-400" : "text-[var(--text-muted)]"
-                      }`}
+                      className={`text-[10px] font-mono ${isActive ? "text-violet-400" : "text-[var(--text-muted)]"
+                        }`}
                     >
                       {seg.timestamp}
                     </span>
@@ -218,11 +244,10 @@ export default function TranscriptionPanel({
                   {/* Content */}
                   <div className="flex-1 min-w-0">
                     <p
-                      className={`text-xs leading-relaxed ${
-                        isActive
+                      className={`text-xs leading-relaxed ${isActive
                           ? "text-[var(--text-primary)] font-medium"
                           : "text-[var(--text-secondary)]"
-                      }`}
+                        }`}
                     >
                       {seg.text}
                     </p>
