@@ -32,6 +32,7 @@ from schemas.models import (
     ConsentStatus,
 )
 from ml import attention_detector
+from ml.attention_model import get_session_detector
 from data.database import (
     log_attention,
     get_attention_logs,
@@ -104,7 +105,7 @@ async def analyze_frame(
         "score": 85,
         "state": "attentive",
         "confidence": 0.92,
-        "message": "Great focus!",
+        "message": "Camera-derived behavioural signal: high band.",
         "model_response": {
             "eye_contact": 0.88,
             "head_pose": "forward",
@@ -134,8 +135,13 @@ async def analyze_frame(
         )
 
     # Run ML model (frame is analyzed in-memory and never persisted raw —
-    # only the derived score/sub-metrics below are written to storage)
-    result = attention_detector.analyze_frame(request.frame_base64)
+    # only the derived score/sub-metrics below are written to storage).
+    # FIX (B-4): each (student, session_id) pair gets its own isolated
+    # detector instance — never the shared `attention_detector` singleton —
+    # so blink timestamps, smoothing, and other temporal state can't leak
+    # between learners or sessions.
+    detector = get_session_detector(current_user.id, request.session_id)
+    result = detector.analyze_frame(request.frame_base64)
     result["consent_confirmed"] = True
 
     if request.study_session_id:
@@ -157,12 +163,20 @@ async def analyze_frame(
 
 
 @router.post("/purge-expired")
-async def purge_expired():
+async def purge_expired(current_user: User = Depends(get_current_user)):
     """
     Delete attention_logs entries older than each student's consented
     retention window (default 30 days). Intended to run on a schedule;
     exposed as a manual endpoint for the prototype since there is no
     background job runner yet.
+
+    FIX (B-5): this used to be callable with no authentication at all —
+    any anonymous caller could trigger retention purges. It now requires
+    a valid session like every other research-data-touching endpoint in
+    this router. (There is no admin/staff role in this app yet — every
+    account is a student account — so this is authentication, not
+    authorization to a privileged role; narrowing who among authenticated
+    users may purge is a research-role decision outside this item's scope.)
     """
     removed = purge_expired_attention_logs()
     return {"removed": removed}
@@ -184,10 +198,17 @@ async def get_attention_history(video_id: str, current_user: User = Depends(get_
 
 
 @router.get("/dummy-snapshot", response_model=AttentionSnapshot)
-async def get_dummy_snapshot():
+async def get_dummy_snapshot(current_user: User = Depends(get_current_user)):
     """
     Get a dummy behavioral-cue snapshot (no camera required).
     Useful for testing the frontend without webcam.
+
+    FIX (B-5): this used to be callable with no authentication, making a
+    research-capable endpoint anonymously reachable. G0 development use of
+    a dummy snapshot is still permitted (this never touches research
+    storage — it doesn't call log_attention), but it now requires a valid
+    logged-in session like the rest of this router, rather than being
+    open to anyone.
     """
     return attention_detector._generate_dummy_snapshot(
         __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ", __import__("time").gmtime())

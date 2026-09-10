@@ -11,10 +11,16 @@ interface AttentionPanelProps {
   scoreHistory: number[]
 }
 
+// FIX (B-6/J-1): these used to label the learner directly with a
+// psychological-state judgment ("Focused" / "Distracted" / "Unfocused",
+// each paired with an emotive emoji). The mentor guidelines prohibit
+// telling a learner the system has determined they are focused,
+// distracted, or otherwise in a psychological state. This now shows only
+// a neutral operational band for the camera-derived behavioural signal.
 const stateConfig = {
-  attentive: { label: "Focused", emoji: "😊", ringColor: "#10b981" },
-  inattentive: { label: "Distracted", emoji: "😐", ringColor: "#f59e0b" },
-  unfocused: { label: "Unfocused", emoji: "😴", ringColor: "#ef4444" },
+  attentive: { label: "High signal band", ringColor: "#10b981" },
+  inattentive: { label: "Medium signal band", ringColor: "#f59e0b" },
+  unfocused: { label: "Low signal band", ringColor: "#ef4444" },
 }
 
 export default function AttentionPanel({
@@ -117,7 +123,6 @@ export default function AttentionPanel({
             border: `1px solid ${config.ringColor}30`,
           }}
         >
-          <span className="text-base">{config.emoji}</span>
           <span className="text-xs font-bold" style={{ color: config.ringColor }}>{config.label}</span>
         </motion.div>
 

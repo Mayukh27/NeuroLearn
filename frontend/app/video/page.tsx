@@ -12,7 +12,7 @@ import {
   Link2,
 } from "lucide-react"
 
-import VideoPlayer from "@/components/VideoPlayer"
+import VideoPlayer, { detectVideoType } from "@/components/VideoPlayer"
 import CameraFeed, { type AttentionSnapshotResponse } from "@/components/CameraFeed"
 import AttentionPanel from "@/components/AttentionPanel"
 import TranscriptionPanel from "@/components/TranscriptionPanel"
@@ -400,6 +400,12 @@ function VideoContent() {
         <div className="lg:col-span-3 space-y-4 order-3">
           <CameraFeed
             isVideoPlaying={isPlaying}
+            // FIX (B-7): mp4 and YouTube embeds give a real pause/ended
+            // signal (see VideoPlayer.tsx); only a generic opaque iframe
+            // ("embed") can never report play state to the parent. Tell
+            // CameraFeed which case this is so it only pauses capture
+            // when the signal is actually trustworthy.
+            videoPlayStateKnown={detectVideoType(effectiveUrl) !== "embed"}
             videoId={selectedVideo?.id || "custom"}
             studentId="student_001"
             sessionId={webcamSessionId}

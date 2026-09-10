@@ -22,6 +22,14 @@
  * nothing is written as a research measurement. onAttentionUpdate is
  * only ever called with a genuine backend response.
  *
+ * FIX (B-7, bind capture to the instructional segment): the frame-capture
+ * and send loops now pause — without tearing down the camera stream
+ * itself — whenever the video is known to be paused or has ended (see
+ * `videoPlayStateKnown` on CameraFeedProps). Previously they ran the
+ * whole time the camera was active regardless of play state, for every
+ * video type, so frames could keep being captured and sent during a
+ * break or after the instructional segment ended.
+ *
  * FIX (start/stop/revoke): "Stop Camera" and "Revoke Consent" used to be
  * the same button/action, so pausing the camera silently erased the
  * consent decision too — the student would be re-prompted with the
@@ -64,6 +72,18 @@ export interface AttentionSnapshotResponse {
 
 interface CameraFeedProps {
   isVideoPlaying: boolean
+  /**
+   * FIX (B-7): whether `isVideoPlaying` reflects a real, trustworthy
+   * pause/play/ended signal for the current video. True for native mp4
+   * playback and YouTube embeds (both fire real state-change events).
+   * False for a generic opaque third-party iframe, where the parent page
+   * has no way to observe play state at all — in that case we fall back
+   * to the previous "capture whenever the camera is active" behavior,
+   * since there's no reliable segment boundary to bind to. Defaults to
+   * true (the safer default: pause capture unless a caller explicitly
+   * says it can't know).
+   */
+  videoPlayStateKnown?: boolean
   videoId: string
   studentId: string
   sessionId: string
@@ -99,6 +119,7 @@ function normSnap(data: any): AttentionSnapshotResponse {
 
 export default function CameraFeed({
   isVideoPlaying,
+  videoPlayStateKnown = true,
   videoId,
   studentId,
   sessionId,
@@ -261,10 +282,18 @@ export default function CameraFeed({
 
   // ══════════════════════════════════════════════════════════
   // STEP 2: Capture frame — video → canvas → base64
-  // Runs on a fast loop (500ms) to keep latestFrameRef fresh
+  // Runs on a fast loop (500ms) to keep latestFrameRef fresh.
+  //
+  // FIX (B-7): only runs while the video is actually playing, whenever we
+  // have a trustworthy signal for that (videoPlayStateKnown). This is the
+  // "designated instructional segment" boundary — paused (a break) or
+  // ended (after the instructional segment) means no frames are captured,
+  // without tearing down the camera stream itself (that's what the
+  // separate Stop Camera / Revoke Consent actions are for).
   // ══════════════════════════════════════════════════════════
   useEffect(() => {
     if (!isActive) return
+    if (videoPlayStateKnown && !isVideoPlaying) return
 
     const captureLoop = setInterval(() => {
       const videoEl = videoElRef.current
@@ -290,7 +319,7 @@ export default function CameraFeed({
       clearInterval(captureLoop)
       console.log("[CameraFeed] Frame capture loop stopped")
     }
-  }, [isActive])
+  }, [isActive, isVideoPlaying, videoPlayStateKnown])
 
   // ══════════════════════════════════════════════════════════
   const stopCamera = useCallback(() => {
@@ -306,12 +335,19 @@ export default function CameraFeed({
     setIsConnected(false)
   }, [])
   // STEP 3: Send frame to backend — POST every 2s
-  // Runs whenever camera is active (NOT gated on isVideoPlaying,
-  // because YouTube/embed videos play inside an iframe and we
-  // cannot detect their play state from the parent)
+  // Runs whenever camera is active AND the video is actually playing,
+  // wherever that signal is trustworthy (videoPlayStateKnown — see prop
+  // doc above). FIX (B-7): this used to run unconditionally whenever the
+  // camera was active, regardless of play state, for every video type —
+  // including mp4 and YouTube, both of which DO give a real pause/ended
+  // signal via VideoPlayer's onPlayStateChange. That meant frames kept
+  // being captured and sent to the backend during pauses/after the video
+  // ended, i.e. outside the designated instructional segment. Only a
+  // generic opaque third-party iframe (no play-state signal available at
+  // all) still runs unconditionally, since there's no boundary to bind to.
   // ══════════════════════════════════════════════════════════
   useEffect(() => {
-    if (!isActive) {
+    if (!isActive || (videoPlayStateKnown && !isVideoPlaying)) {
       if (sendLoopRef.current) {
         clearInterval(sendLoopRef.current)
         sendLoopRef.current = null
@@ -403,7 +439,7 @@ export default function CameraFeed({
       }
       console.log("[CameraFeed] Send loop stopped")
     }
-  }, [isActive, onConsentChange])
+  }, [isActive, isVideoPlaying, videoPlayStateKnown, onConsentChange])
 
 
   // Explicit opt-out: stops capture AND clears the consent record

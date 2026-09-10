@@ -140,7 +140,12 @@ class Course(BaseModel):
 
 class AttentionModelOutput(BaseModel):
     """Raw JSON output from the behavioral_cue detection ML model"""
-    eye_contact: float = Field(ge=0, le=1)
+    eye_contact: Optional[float] = Field(default=None, ge=0, le=1)
+    # FIX (B-3): when iris landmarks aren't available this frame, eye_contact
+    # is not a genuine gaze measurement — it falls back to the head-pose /
+    # eye-openness calibration instead. This flag says so, rather than
+    # letting a substituted number pass silently as a real measurement.
+    eye_contact_estimated: bool = False
     eye_open: Optional[float] = Field(default=None, ge=0, le=1)
     eyes_closed_duration: Optional[float] = Field(default=None, ge=0)
     head_pose: Literal["forward", "slightly_away", "away"]

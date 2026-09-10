@@ -73,11 +73,19 @@ def derive_subscores(attention_snapshot: Dict) -> AttentionSubscores:
 
     head_pose_label = model_response.get("head_pose", "forward")
     head_pose_score = _HEAD_POSE_SCORE.get(head_pose_label, 0.5)
-    gaze_score = float(model_response.get("eye_contact", 0.5))
-    if head_pose_label == "forward":
-        gaze_score = max(gaze_score, 0.65)
-    elif head_pose_label == "slightly_away":
-        gaze_score = max(gaze_score, 0.35)
+    # FIX (B-3 follow-up): eye_contact is now Optional — None means the
+    # gaze measurement was genuinely unavailable this frame, not 0.0 or
+    # any other number. dict.get(..., 0.5) would NOT catch this, since the
+    # key is present with value None. Fall back to the neutral 0.5 default
+    # (same "absence of signal is neutral, not zero" convention used in
+    # rolling_average_attention below) only when there's no measurement.
+    raw_eye_contact = model_response.get("eye_contact")
+    gaze_score = float(raw_eye_contact) if raw_eye_contact is not None else 0.5
+    if raw_eye_contact is not None:
+       if head_pose_label == "forward":
+          gaze_score = max(gaze_score, 0.65)
+       elif head_pose_label == "slightly_away":
+          gaze_score = max(gaze_score, 0.35)
 
     blink_rate = float(model_response.get("blink_rate", _IDEAL_BLINK_RATE))
     blink_score = 1.0 - min(1.0, abs(blink_rate - _IDEAL_BLINK_RATE) / _BLINK_TOLERANCE)

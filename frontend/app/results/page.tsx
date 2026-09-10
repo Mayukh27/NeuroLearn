@@ -253,13 +253,13 @@ ASSESSMENT
   XP Earned:    +${a.xpEarned}
   Difficulty:   ${a.difficulty}
 
-ATTENTION
+BEHAVIORAL CUE
   Average:      ${attn.avgScore?.toFixed?.(1) || attn.avgScore}%
   Snapshots:    ${attn.totalSnapshots}
   Eye Contact:  ${((attn.avgEyeContact || 0) * 100).toFixed(0)}%
-  Attentive:    ${attn.attentivePercent}%
-  Inattentive:  ${attn.inattentivePercent}%
-  Unfocused:    ${attn.unfocusedPercent}%
+  High signal band:    ${attn.attentivePercent}%
+  Medium signal band:  ${attn.inattentivePercent}%
+  Low signal band:     ${attn.unfocusedPercent}%
 
 ADAPTIVE ANALYSIS
   Trend:        ${ar.performanceTrend}

@@ -43,7 +43,7 @@ import {
 // ── URL Type Detection ──
 type VideoType = "mp4" | "youtube" | "embed"
 
-function detectVideoType(url: string): VideoType {
+export function detectVideoType(url: string): VideoType {
   if (!url) return "mp4"
   if (
     url.includes("youtube.com/watch") ||

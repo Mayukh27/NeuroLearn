@@ -404,11 +404,15 @@ def generate_report_card(data: dict) -> bytes:
 
     attn_charts = [
         [
+            # FIX (B-6/J-1): "Attentive"/"Inattentive"/"Unfocused" were
+            # direct learner-facing psychological-state judgment labels in
+            # a report the student downloads. Relabeled to the same
+            # neutral operational bands used in the live UI (AttentionPanel).
             _draw_pie_chart([
-                ("Attentive", att_pct, GREEN),
-                ("Inattentive", inatt_pct, AMBER),
-                ("Unfocused", unfoc_pct, RED),
-            ], "Behavioral Cue States"),
+                ("High signal band", att_pct, GREEN),
+                ("Medium signal band", inatt_pct, AMBER),
+                ("Low signal band", unfoc_pct, RED),
+            ], "Behavioral Cue Signal Bands"),
             _draw_bar_chart([
                 ("Eye Contact", attn.get("avgEyeContact", 0.8) * 100),
                 ("Blink Normality", min(100, max(0, 100 - abs(attn.get("avgBlinkRate", 16) - 17) * 6))),

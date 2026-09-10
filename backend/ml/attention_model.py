@@ -1,4 +1,3 @@
-
 import base64
 import time
 import math
@@ -34,25 +33,26 @@ class AttentionDetector:
     ATTENTIVE_THRESHOLD = 65
     INATTENTIVE_THRESHOLD = 30
 
-    # Messages for each state
+    # FIX (B-6/J-1): these used to make direct psychological-state
+    # judgments ("You're fully engaged", "You seem a bit distracted") and
+    # give unsolicited advice ("Take a 2-minute break"). The mentor
+    # guidelines prohibit learner-facing claims/judgments about attention,
+    # cognition, emotion, or readiness, and prohibit psychological advice
+    # based on the camera signal. These are neutral, factual statements of
+    # the operational behavioural-signal band only — no state claim, no
+    # advice, no encouragement/discouragement framing.
     MESSAGES = {
         "attentive": [
-            "Excellent focus! You're fully engaged.",
-            "Great concentration! Keep it up.",
-            "You're doing amazing — stay locked in!",
-            "Perfect behavioral_cue. You're absorbing this well.",
+            "Camera-derived behavioural signal: high band.",
+            "Operational signal for this interval: high.",
         ],
         "inattentive": [
-            "Looks like your behavioral_cue is drifting. Try refocusing.",
-            "You seem a bit distracted. The key point is coming up!",
-            "Hey, try to stay with the content — you've got this!",
-            "A quick stretch might help you refocus.",
+            "Camera-derived behavioural signal: medium band.",
+            "Operational signal for this interval: medium.",
         ],
         "unfocused": [
-            "You seem unfocused. Consider taking a short break.",
-            "Your behavioral_cue is very low. Pause and stretch if needed.",
-            "Try closing other tabs and refocusing on the video.",
-            "Take a 2-minute break, then come back refreshed!",
+            "Camera-derived behavioural signal: low band.",
+            "Operational signal for this interval: low.",
         ],
     }
 
@@ -115,11 +115,19 @@ class AttentionDetector:
         ear = (v1 + v2) / (2.0 * h1 + 1e-6)
         return ear
 
-    def _compute_gaze_score(self, landmarks, w: int, h: int) -> float:
+    def _compute_gaze_score(self, landmarks, w: int, h: int) -> tuple[Optional[float], bool]:
         """
-        Compute eye contact / gaze score (0-1).
-        Based on iris position relative to eye corners.
+        Compute eye contact / gaze score (0-1) from iris landmark position.
         Higher = looking at screen.
+
+        Returns (score, estimated):
+          - (score, False) — a genuine measurement from this frame's iris
+            landmarks.
+          - (None, True) — iris landmarks were unavailable this frame. No
+            gaze measurement was taken; the caller must not substitute a
+            constant and treat it as one (B-3). Callers fall back to the
+            head-pose / eye-openness calibration only, and must flag the
+            resulting eye_contact value as estimated.
         """
         try:
             # Left iris center (index 468-472 from refine_landmarks)
@@ -154,10 +162,11 @@ class AttentionDetector:
             vert_score = max(0.0, min(1.0, vert_score))
 
             gaze = (left_score + right_score + vert_score) / 3.0
-            return max(0.0, min(1.0, gaze))
+            return max(0.0, min(1.0, gaze)), False
 
         except (IndexError, AttributeError):
-            return 0.65  # Default if iris landmarks are unavailable
+            # Iris landmarks unavailable this frame — no measurement (B-3).
+            return None, True
 
     def _compute_head_pose(self, landmarks, w: int, h: int) -> str:
         """
@@ -256,7 +265,7 @@ class AttentionDetector:
         blink_rate = self._update_blink_rate(avg_ear)
 
         # 3. Gaze / eye contact score
-        gaze_score = self._compute_gaze_score(landmarks, w, h)
+        gaze_score, gaze_estimated = self._compute_gaze_score(landmarks, w, h)
 
         # 4. Head pose
         head_pose = self._compute_head_pose(landmarks, w, h)
@@ -275,24 +284,40 @@ class AttentionDetector:
             eyes_closed_duration = now - self._eyes_closed_since
         else:
             self._eyes_closed_since = None
-        calibrated_gaze_score = gaze_score
+        calibrated_gaze_score = gaze_score if gaze_score is not None else 0.0
         if eye_open_score > 0.2 and head_pose == "forward":
             calibrated_gaze_score = max(calibrated_gaze_score, 0.65)
         elif eye_open_score > 0.2 and head_pose == "slightly_away":
             calibrated_gaze_score = max(calibrated_gaze_score, 0.35)
 
-        # Normal blink rate: 15-20/min. Too low = staring/distracted, too high = tired
+        # Normal blink rate: 15-20/min. Too low = staring/distracted, too high = tired.
+        # FIX (B-3): there isn't yet enough data (first 20s, zero blinks so
+        # far) to judge blink normalcy either way. Previously this
+        # substituted a fixed 0.85 "normal" value and blended it into the
+        # score as if it were measured. Now the blink term is simply
+        # excluded from the weighted score when it can't yet be judged,
+        # and the remaining terms are renormalized — no fabricated number
+        # is treated as a real measurement.
         monitoring_seconds = now - self._attention_started_at
-        if monitoring_seconds < 20 and blink_rate == 0:
-            blink_normal = 0.85
-        else:
-            blink_normal = 1.0 - min(1.0, abs(blink_rate - 17) / 15)
+        blink_signal_available = not (monitoring_seconds < 20 and blink_rate == 0)
+        blink_normal = (
+            1.0 - min(1.0, abs(blink_rate - 17) / 15) if blink_signal_available else 0.0
+        )
+
+        gaze_weight = 0.20
+        head_weight = 0.45
+        eye_open_weight = 0.30
+        blink_weight = 0.05 if blink_signal_available else 0.0
+        total_weight = gaze_weight + head_weight + eye_open_weight + blink_weight
 
         raw_score = (
-            calibrated_gaze_score * 0.20
-            + head_score * 0.45
-            + eye_open_score * 0.30
-            + blink_normal * 0.05
+            (
+                calibrated_gaze_score * gaze_weight
+                + head_score * head_weight
+                + eye_open_score * eye_open_weight
+                + blink_normal * blink_weight
+            )
+            / total_weight
         ) * 100
         if self._smoothed_score is None:
             self._smoothed_score = raw_score
@@ -324,7 +349,12 @@ class AttentionDetector:
             state = "unfocused"
 
         # ── Confidence based on face detection quality ──
-        confidence = min(1.0, 0.7 + gaze_score * 0.3)
+        # FIX (B-3): don't feed a None gaze_score into the confidence
+        # formula, and reflect the lower certainty when gaze is estimated.
+        gaze_for_confidence = gaze_score if gaze_score is not None else 0.0
+        confidence = min(1.0, 0.7 + gaze_for_confidence * 0.3)
+        if gaze_estimated:
+            confidence = min(confidence, 0.7)
 
         message = random.choice(self.MESSAGES[state])
 
@@ -335,7 +365,14 @@ class AttentionDetector:
             "confidence": round(confidence, 2),
             "message": message,
             "model_response": {
-                "eye_contact": round(gaze_score, 3),
+                # FIX (B-3 follow-up): report the actual measurement. When
+                # iris landmarks weren't available this frame, eye_contact
+                # is genuinely missing — None — not a substituted number.
+                # (calibrated_gaze_score, which folds in head-pose/eye-open
+                # when gaze is unavailable, is still used internally for
+                # raw_score above; it just isn't reported as "eye contact".)
+                "eye_contact": round(gaze_score, 3) if gaze_score is not None else None,
+                "eye_contact_estimated": gaze_estimated,
                 "eye_open": round(eye_open_score, 3),
                 "eyes_closed_duration": round(eyes_closed_duration, 1),
                 "head_pose": head_pose,
@@ -356,7 +393,8 @@ class AttentionDetector:
             "confidence": 0.3,
             "message": "No face detected. Please ensure your camera can see your face.",
             "model_response": {
-                "eye_contact": 0.0,
+                "eye_contact": None,
+                "eye_contact_estimated": True,
                 "eye_open": 0.0,
                 "head_pose": "away",
                 "face_detected": False,
@@ -410,5 +448,56 @@ class AttentionDetector:
             self.face_mesh.close()
 
 
-# ── Singleton instance ──
+# ── FIX (B-4): per-learner/session isolation ──────────────────────────────
+# AttentionDetector holds mutable per-stream temporal state (blink
+# timestamps, EMA-smoothed score, "eyes closed since" timer, previous EAR).
+# A single shared module-level instance meant two participants/sessions
+# whose snapshot requests interleaved would corrupt each other's state —
+# e.g. one learner's blinks counted toward another's blink rate, or one
+# learner's smoothed score carrying over into another's first frame.
+#
+# `attention_detector` below remains as a single stateless-use instance
+# for the dev-only dummy endpoint and the startup health check (neither
+# accumulates or shares temporal state across learners). Real research
+# scoring must go through `get_session_detector()`, which hands each
+# distinct (participant, session) pair its own isolated instance.
+_IDLE_EVICTION_SECONDS = 600  # drop detector state for streams idle 10+ min
+
+_session_detectors: dict[tuple[str, str], "AttentionDetector"] = {}
+
+
+def get_session_detector(participant_id: str, session_id: str) -> "AttentionDetector":
+    """
+    Return the AttentionDetector instance isolated to this
+    (participant_id, session_id) pair, creating one on first use.
+
+    This is the only entry point research code should use to obtain a
+    detector for scoring real frames — never the shared `attention_detector`
+    singleton, which is reserved for stateless dev/health-check uses.
+    """
+    _evict_idle_detectors()
+    key = (participant_id, session_id)
+    detector = _session_detectors.get(key)
+    if detector is None:
+        detector = AttentionDetector()
+        _session_detectors[key] = detector
+    return detector
+
+
+def _evict_idle_detectors() -> None:
+    """Release detectors (and their MediaPipe resources) that have been
+    idle past the eviction window, so state never silently leaks into a
+    later, unrelated session and resources aren't held forever."""
+    now = time.time()
+    stale_keys = [
+        key
+        for key, det in _session_detectors.items()
+        if det._last_analysis_at is not None
+        and now - det._last_analysis_at > _IDLE_EVICTION_SECONDS
+    ]
+    for key in stale_keys:
+        _session_detectors.pop(key).cleanup()
+
+
+# ── Singleton instance — dev-only dummy endpoint / health check ──
 attention_detector = AttentionDetector()

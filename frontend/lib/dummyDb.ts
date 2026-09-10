@@ -506,21 +506,21 @@ export function generateAttentionSnapshot(): AttentionSnapshot {
   const [min, max] = scoreRanges[state]
   const score = Math.floor(Math.random() * (max - min + 1)) + min
 
+  // FIX (B-6/J-1): neutral operational-signal wording, matching the same
+  // fix in backend/ml/attention_model.py — no psychological-state claims,
+  // no advice.
   const messages = {
     attentive: [
-      "Excellent focus! You're fully engaged.",
-      "Great concentration! Keep it up.",
-      "You're doing amazing — stay locked in!",
+      "Camera-derived behavioural signal: high band.",
+      "Operational signal for this interval: high.",
     ],
     inattentive: [
-      "Looks like your behavioral cue is drifting. Try refocusing.",
-      "You seem a bit distracted. The key point is coming up!",
-      "Hey, try to stay with the content — you've got this!",
+      "Camera-derived behavioural signal: medium band.",
+      "Operational signal for this interval: medium.",
     ],
     unfocused: [
-      "You seem unfocused. Consider taking a short break.",
-      "Your behavioral cue is very low. Pause and stretch if needed.",
-      "Try closing other tabs and refocusing on the video.",
+      "Camera-derived behavioural signal: low band.",
+      "Operational signal for this interval: low.",
     ],
   }
 
