@@ -290,32 +290,28 @@ class AttentionDetector:
         elif eye_open_score > 0.2 and head_pose == "slightly_away":
             calibrated_gaze_score = max(calibrated_gaze_score, 0.35)
 
-        # Normal blink rate: 15-20/min. Too low = staring/distracted, too high = tired.
-        # FIX (B-3): there isn't yet enough data (first 20s, zero blinks so
-        # far) to judge blink normalcy either way. Previously this
-        # substituted a fixed 0.85 "normal" value and blended it into the
-        # score as if it were measured. Now the blink term is simply
-        # excluded from the weighted score when it can't yet be judged,
-        # and the remaining terms are renormalized — no fabricated number
-        # is treated as a real measurement.
-        monitoring_seconds = now - self._attention_started_at
-        blink_signal_available = not (monitoring_seconds < 20 and blink_rate == 0)
-        blink_normal = (
-            1.0 - min(1.0, abs(blink_rate - 17) / 15) if blink_signal_available else 0.0
-        )
-
+        # FIX (B-8): blink_rate is derived from analyze_frame() calls, which
+        # run at an effective 0.5 Hz (measured: CameraFeed.tsx captures
+        # every 500ms but only transmits the latest frame every 2000ms).
+        # A physiological blink lasts ~100-400ms, so a sample every 2s
+        # cannot reliably catch it — matches the mentor guidelines'
+        # "sparse snapshots cannot establish blink/closure". blink_rate is
+        # therefore excluded from the scored fusion below; it is still
+        # computed and returned in model_response as a diagnostic value
+        # only (see return dict) and must not be treated as a validated
+        # behavioral measurement. gaze_weight/head_weight/eye_open_weight
+        # are unchanged from their prior values — dividing by total_weight
+        # renormalizes the remaining three proportionally.
         gaze_weight = 0.20
         head_weight = 0.45
         eye_open_weight = 0.30
-        blink_weight = 0.05 if blink_signal_available else 0.0
-        total_weight = gaze_weight + head_weight + eye_open_weight + blink_weight
+        total_weight = gaze_weight + head_weight + eye_open_weight
 
         raw_score = (
             (
                 calibrated_gaze_score * gaze_weight
                 + head_score * head_weight
                 + eye_open_score * eye_open_weight
-                + blink_normal * blink_weight
             )
             / total_weight
         ) * 100
@@ -377,6 +373,8 @@ class AttentionDetector:
                 "eyes_closed_duration": round(eyes_closed_duration, 1),
                 "head_pose": head_pose,
                 "face_detected": True,
+                # Diagnostic only (FIX B-8) — not used in raw_score above,
+                # not a validated blink/closure measurement at 0.5 Hz.
                 "blink_rate": round(blink_rate, 1),
             },
             # FIX (MJ4, peer review packet): explicit, reader-visible tag —
