@@ -176,6 +176,23 @@ def compute_crs(
         explanation=explanation,
         detail={
             "performance": asdict(perf),
+            # FIX (D-4): behavioral_cue previously had NO structured entry
+            # in `detail` at all — only its raw component score reached
+            # ResearchCRSDecision.behavioral_cue, with no record of
+            # whether it was a genuine camera measurement or the neutral
+            # 0.5 default. This is the one CRS component most directly
+            # tied to the camera-integrity work elsewhere in this audit
+            # (B-1 through B-8), so its provenance is exactly the kind of
+            # thing that must survive into the permanent research record.
+            # Matches the structure of the other four components' detail
+            # blocks, with an explicit `source` flag as SAP section 9
+            # requires ("Missing timing, camera, or content values use
+            # 0.50 with source flags").
+            "behavioral_cue": {
+                "score": round(attention_value, 4),
+                "source": "measured" if attention_score_pct is not None else "default",
+                "explanation": attention_explanation,
+            },
             "trend": asdict(trend_detail),
             "integrity": asdict(integrity_detail) if integrity_detail else None,
             "complexity": asdict(complexity_detail),

@@ -213,6 +213,24 @@ class ConsentStatus(BaseModel):
     version: str = "1.0"
 
 
+# ── Study-participation consent (A-2) ──────────────────────────
+# Separate from webcam consent above — the mentor guidelines treat study
+# consent and camera choice as separate decisions. This is the consent
+# checked before any research record is created.
+
+class StudyConsentGrant(BaseModel):
+    """A student's response to the study-participation consent prompt."""
+    granted: bool
+    version: str = "1.0"
+
+
+class StudyConsentStatus(BaseModel):
+    student_id: str
+    granted: bool
+    granted_at: Optional[str] = None
+    version: str = "1.0"
+
+
 # ── Transcription ───────────────────────────────────────────
 
 class WordTimestamp(BaseModel):
@@ -292,7 +310,7 @@ class AssessmentSession(BaseModel):
     questions: list[AssessmentQuestion]
     difficulty: Literal["easy", "medium", "hard"]
     time_limit: int  # seconds
-    attention_score_during_video: float
+    attention_score_during_video: Optional[float] = None
     adaptive_metadata: AdaptiveMetadata
 
 

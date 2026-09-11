@@ -478,6 +478,42 @@ export async function transcribeAudioChunk(
 // ASSESSMENT — Adaptive quiz generation + submission
 // ============================================================
 
+export interface StudyConsentStatus {
+  studentId: string
+  granted: boolean
+  grantedAt?: string | null
+  version: string
+}
+
+/**
+ * FIX (A-2 follow-up): the backend now refuses to create any research
+ * record (study session, assessment response, etc.) until this
+ * study-participation consent — separate from webcam consent — is on
+ * file. Check status before calling startStudySession.
+ */
+export async function getStudyConsent(): Promise<StudyConsentStatus> {
+  const data = await apiFetch<any>("/research/consent")
+  return {
+    studentId: data.student_id,
+    granted: data.granted,
+    grantedAt: data.granted_at,
+    version: data.version,
+  }
+}
+
+export async function setStudyConsent(granted: boolean, version = "1.0"): Promise<StudyConsentStatus> {
+  const data = await apiFetch<any>("/research/consent", {
+    method: "POST",
+    body: JSON.stringify({ granted, version }),
+  })
+  return {
+    studentId: data.student_id,
+    granted: data.granted,
+    grantedAt: data.granted_at,
+    version: data.version,
+  }
+}
+
 export async function startStudySession(
   courseId?: string,
   videoId?: string,
@@ -522,7 +558,7 @@ export interface AssessmentSession {
   questions: AssessmentQuestion[]
   difficulty: "easy" | "medium" | "hard"
   timeLimit: number
-  attentionScoreDuringVideo: number
+  attentionScoreDuringVideo: number | null
   adaptiveMetadata: {
     previousScore: number | null
     adjustedDifficulty: string

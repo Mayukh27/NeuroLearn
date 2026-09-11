@@ -9,8 +9,12 @@ from data.database import (
     get_or_create_research_participant,
     get_study_session,
     record_completed_video,
+    get_study_consent,
+    set_study_consent,
+    StudyConsentRequired,
 )
 from data.models_orm import User
+from schemas.models import StudyConsentGrant, StudyConsentStatus
 
 
 router = APIRouter(prefix="/api/research", tags=["Research Study"])
@@ -30,9 +34,32 @@ class CompleteStudyVideoRequest(BaseModel):
     transcript_text: str = ""
 
 
+# FIX (A-2): study-participation consent — separate from webcam consent
+# (routers/attention.py). Checked as the single gate before any research
+# record is created; see StudyConsentRequired / get_or_create_research_participant.
+
+@router.get("/consent", response_model=StudyConsentStatus)
+async def get_study_consent_status(current_user: User = Depends(get_current_user)):
+    record = get_study_consent(current_user.id)
+    if record is None:
+        return StudyConsentStatus(student_id=current_user.id, granted=False)
+    return StudyConsentStatus(**record)
+
+
+@router.post("/consent", response_model=StudyConsentStatus)
+async def grant_or_revoke_study_consent(
+    grant: StudyConsentGrant,
+    current_user: User = Depends(get_current_user),
+):
+    return StudyConsentStatus(**set_study_consent(current_user.id, grant.granted, grant.version))
+
+
 @router.get("/participant")
 async def get_participant(current_user: User = Depends(get_current_user)):
-    return get_or_create_research_participant(current_user.id)
+    try:
+        return get_or_create_research_participant(current_user.id)
+    except StudyConsentRequired as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
 
 
 @router.post("/study-sessions")
@@ -40,12 +67,15 @@ async def start_study_session(
     request: CreateStudySessionRequest,
     current_user: User = Depends(get_current_user),
 ):
-    return get_or_create_study_session_for_material(
-        current_user.id,
-        course_id=request.course_id,
-        module_id=request.module_id,
-        video_id=request.video_id,
-    )
+    try:
+        return get_or_create_study_session_for_material(
+            current_user.id,
+            course_id=request.course_id,
+            module_id=request.module_id,
+            video_id=request.video_id,
+        )
+    except StudyConsentRequired as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
 
 @router.get("/study-sessions/active")
 async def get_active_study_session(

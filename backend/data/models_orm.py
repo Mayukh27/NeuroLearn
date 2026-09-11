@@ -169,6 +169,22 @@ class Consent(Base):
     user = relationship("User", back_populates="consent")
 
 
+class StudyConsent(Base):
+    """
+    FIX (A-2): study-participation consent — the mentor guidelines treat
+    this as a decision separate from webcam/camera consent ("Study
+    consent and camera choice are separate decisions"). One row per user.
+    A granted row here is the single required gate checked before any
+    research record (ResearchParticipant / StudySession, and everything
+    keyed off a study_session_id downstream of it) is ever created.
+    """
+    __tablename__ = "study_consent"
+    student_id = Column(String, ForeignKey("users.id"), primary_key=True)
+    granted = Column(Boolean, default=False)
+    granted_at = Column(DateTime, nullable=True)
+    version = Column(String, default="1.0")
+
+
 class AttentionLog(Base):
     __tablename__ = "attention_logs"
     id = Column(String, primary_key=True, default=_uuid)

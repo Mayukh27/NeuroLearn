@@ -326,7 +326,11 @@ function AssessmentContent() {
           <span className="font-semibold capitalize text-violet-400">{session.difficulty}</span>
           {" · "}
           Behavioral Cue during video:{" "}
-          <span className="font-semibold text-cyan-400">{Math.round(session.attentionScoreDuringVideo)}%</span>
+          <span className="font-semibold text-cyan-400">
+            {session.attentionScoreDuringVideo == null
+              ? "no data"
+              : `${Math.round(session.attentionScoreDuringVideo)}%`}
+          </span>
         </p>
         {session.adaptiveMetadata?.reason && (
           <p className="text-[10px] text-[var(--text-muted)] mt-1 italic max-w-md mx-auto">

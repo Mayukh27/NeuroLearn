@@ -54,6 +54,7 @@ from data.database import (
     save_research_legacy_decision,
     save_single_question_response,
     update_assessment_adaptive_state,
+    StudyConsentRequired,
 )
 from data.db import get_db
 from data.models_orm import User
@@ -537,7 +538,7 @@ async def generate_assessment(
             video_id=request.video_id,
             requested_study_session_id=request.study_session_id,
         )
-    except ValueError as exc:
+    except (ValueError, StudyConsentRequired) as exc:
         raise HTTPException(status_code=403, detail=str(exc))
 
     completed_context = get_completed_video_context(study_session["study_session_id"])
@@ -744,7 +745,7 @@ async def submit_adaptive_answer(
             current_user.id,
             requested_study_session_id=session["study_session_id"],
         )
-    except ValueError as exc:
+    except (ValueError, StudyConsentRequired) as exc:
         raise HTTPException(status_code=403, detail=str(exc))
 
     state = dict(session.get("adaptive_state") or {})
@@ -891,7 +892,7 @@ async def submit_assessment(
             current_user.id,
             requested_study_session_id=session["study_session_id"],
         )
-    except ValueError as exc:
+    except (ValueError, StudyConsentRequired) as exc:
         raise HTTPException(status_code=403, detail=str(exc))
 
     return _finalize_assessment(

@@ -76,7 +76,7 @@ class AdaptiveEngine:
         self,
         student_id: str,
         current_score: float,
-        attention_score: float,
+        attention_score: Optional[float],
         time_spent: int,
         time_limit: int,
         previous_difficulty: str = "medium",
@@ -101,9 +101,14 @@ class AdaptiveEngine:
         existing frontend code that only reads the old keys is unaffected.
         """
         if not CRS_CONFIG.crs_enabled:
+            # FIX (D-4 follow-up): attention_score may now genuinely be
+            # None; the rule-cascade fallback below does direct numeric
+            # comparisons on it, so it needs a concrete value here too —
+            # same neutral-default convention as compute_crs uses.
             return self._determine_difficulty_legacy(
-                student_id, current_score, attention_score, time_spent,
-                time_limit, previous_difficulty, previous_scores,
+                student_id, current_score,
+                attention_score if attention_score is not None else 50.0,
+                time_spent, time_limit, previous_difficulty, previous_scores,
             )
 
         scores_history = self._scores_for(student_id, previous_scores, current_score)
@@ -118,7 +123,16 @@ class AdaptiveEngine:
         )
 
         trend_label = crs_result.detail["trend"]["label"]
-        strengths, weaknesses = self._analyze_areas(current_score, attention_score)
+        # FIX (D-4 follow-up): attention_score may now genuinely be None
+        # (no camera data at all) — compute_crs above already handles that
+        # correctly and records it in crs_result.detail["behavioral_cue"]
+        # ["source"]. _analyze_areas is purely cosmetic (strength/weakness
+        # labels for display), so it gets a neutral display value here;
+        # this does NOT affect the stored decision's source flag, which
+        # comes from the untouched `attention_score` passed to compute_crs.
+        strengths, weaknesses = self._analyze_areas(
+            current_score, attention_score if attention_score is not None else 50.0
+        )
         recommended_action = self._recommended_action(crs_result.difficulty, trend_label)
 
         self._record_history(
@@ -149,7 +163,7 @@ class AdaptiveEngine:
     def get_initial_difficulty(
         self,
         student_id: str,
-        attention_score: float,
+        attention_score: Optional[float],
         previous_score: Optional[float] = None,
         previous_scores: Optional[list[float]] = None,
         transcript_text: Optional[str] = None,
@@ -159,7 +173,11 @@ class AdaptiveEngine:
         Signature UNCHANGED for backward compatibility.
         """
         if not CRS_CONFIG.crs_enabled:
-            return self._get_initial_difficulty_legacy(student_id, attention_score, previous_score)
+            return self._get_initial_difficulty_legacy(
+                student_id,
+                attention_score if attention_score is not None else 50.0,
+                previous_score,
+            )
 
         scores_history = self._history.get(student_id, [])
         # The optional explicit history is supplied by the durable research

@@ -17,11 +17,13 @@ import CameraFeed, { type AttentionSnapshotResponse } from "@/components/CameraF
 import AttentionPanel from "@/components/AttentionPanel"
 import TranscriptionPanel from "@/components/TranscriptionPanel"
 import VideoLinkSelector from "@/components/VideoLinkSelector"
+import StudyConsentModal from "@/components/StudyConsentModal"
 import {
   fetchCourseById,
   fetchCourses,
   completeStudyVideo,
   startStudySession,
+  getStudyConsent,
   type Course,
   type VideoLink,
   type StudySession,
@@ -62,6 +64,10 @@ function VideoContent() {
   // one browser session — see getOrCreateWebcamSessionId() for why.
   const [webcamSessionId] = useState(() => getOrCreateWebcamSessionId())
   const [studySession, setStudySession] = useState<StudySession | null>(null)
+  // FIX (A-2 follow-up): the backend requires study-participation consent
+  // before it will create a StudySession at all. null = not checked yet,
+  // false = checked and not granted (show the modal), true = granted.
+  const [studyConsentGranted, setStudyConsentGranted] = useState<boolean | null>(null)
   const [behavioralCueGranted, setBehavioralCueGranted] = useState<boolean | null>(null)
   // FIX (auto-revoke on session completion): flipped true right before
   // navigating to the assessment. CameraFeed watches this prop and
@@ -121,6 +127,21 @@ function VideoContent() {
   }, [courseIdParam, videoIdParam])
 
   useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const status = await getStudyConsent()
+        if (!cancelled) setStudyConsentGranted(status.granted)
+      } catch (err) {
+        console.error("Failed to check study consent status:", err)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
     if (!course || !selectedVideo) return
     if (studySessionParam) {
       setStudySession({
@@ -133,6 +154,12 @@ function VideoContent() {
       })
       return
     }
+    // FIX (A-2 follow-up): don't attempt to create a study session until
+    // we know study consent is granted — the backend 403s otherwise, and
+    // retrying the same request in a loop wouldn't help. Once
+    // studyConsentGranted flips true (see StudyConsentModal below), this
+    // effect re-runs and proceeds normally.
+    if (studyConsentGranted !== true) return
     if (sessionCreatedForCourseRef.current === course.id) return
     sessionCreatedForCourseRef.current = course.id
 
@@ -150,7 +177,7 @@ function VideoContent() {
     return () => {
       cancelled = true
     }
-  }, [course?.id, selectedVideo?.id, studySessionParam])
+  }, [course?.id, selectedVideo?.id, studySessionParam, studyConsentGranted])
 
   const handleTimeUpdate = useCallback((ct: number, dur: number) => {
     setCurrentTime(ct)
@@ -288,6 +315,15 @@ function VideoContent() {
 
   return (
     <div className="p-4 md:p-6 max-w-[1500px] mx-auto">
+      {/* FIX (A-2 follow-up): resuming an existing session (studySessionParam)
+          already implies consent was granted when that session was first
+          created — don't re-prompt in that case. */}
+      {studyConsentGranted === false && !studySessionParam && (
+        <StudyConsentModal
+          onDecision={() => setStudyConsentGranted(true)}
+          onDecline={() => router.push("/dashboard")}
+        />
+      )}
       <motion.div initial={{ opacity: 0, y: -15 }} animate={{ opacity: 1, y: 0 }} className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={() => router.push("/dashboard")}

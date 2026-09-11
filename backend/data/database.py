@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 from data.db import SessionLocal
 from data.models_orm import (
     User, Course, AutoCourse, AssessmentSession, AssessmentResult,
-    CRSHistory, Consent, AttentionLog, DailyChallenge, Notification,
+    CRSHistory, Consent, StudyConsent, AttentionLog, DailyChallenge, Notification,
     DailyChallengeProgress, PasswordResetToken, RefreshToken,
     ResearchParticipant, StudySession, QuestionResponse, ResearchCRSDecision,
     ResearchLegacyDecision,
@@ -42,6 +42,20 @@ MIXED_METHOD_CONDITION = "MIXED"
 FIXED_METHOD_SEQUENCE = "MCRF_THEN_LEGACY"
 VALID_STUDY_CONDITIONS = {"MCRF", "LEGACY", MIXED_METHOD_CONDITION}
 VALID_SEQUENCE_ORDERS = {"MCRF_THEN_LEGACY", "LEGACY_THEN_MCRF"}
+
+
+class StudyConsentRequired(Exception):
+    """
+    FIX (A-2): raised by get_or_create_research_participant() — the root
+    creation point for ResearchParticipant/StudySession rows — when no
+    granted study_consent record exists for this user. Every research
+    write downstream (assessment responses, prepost results, CRS
+    decisions, video completions) is keyed to a study_session_id that can
+    only exist if a StudySession was created, which can only happen
+    through this function, so gating here gates all of them. Routers
+    catch this and return 403; they must not swallow it and proceed.
+    """
+    pass
 
 
 def level_from_xp(xp: int) -> int:
@@ -92,6 +106,52 @@ def _participant_number(participant_id: str) -> int:
         return 0
 
 
+def get_study_consent(user_id: str, db: Optional[Session] = None) -> Optional[dict]:
+    """FIX (A-2): look up the current study-participation consent record."""
+    owns_session = db is None
+    db = db or _session()
+    try:
+        row = db.get(StudyConsent, user_id)
+        if row is None:
+            return None
+        return {
+            "student_id": row.student_id,
+            "granted": bool(row.granted),
+            "granted_at": row.granted_at.isoformat() if row.granted_at else None,
+            "version": row.version,
+        }
+    finally:
+        if owns_session:
+            db.close()
+
+
+def set_study_consent(user_id: str, granted: bool, version: str = "1.0") -> dict:
+    """FIX (A-2): record the authenticated student's study-participation
+    consent decision. This is independent of webcam consent."""
+    db = _session()
+    try:
+        row = db.get(StudyConsent, user_id)
+        now = datetime.utcnow()
+        if row is None:
+            row = StudyConsent(
+                student_id=user_id, granted=granted, granted_at=now, version=version,
+            )
+            db.add(row)
+        else:
+            row.granted = granted
+            row.granted_at = now
+            row.version = version
+        db.commit()
+        return {
+            "student_id": user_id,
+            "granted": granted,
+            "granted_at": now.isoformat(),
+            "version": version,
+        }
+    finally:
+        db.close()
+
+
 def _next_participant_id(db: Session) -> str:
     rows = db.execute(select(ResearchParticipant.participant_id)).all()
     max_seen = max((_participant_number(r[0]) for r in rows), default=0)
@@ -113,6 +173,17 @@ def get_or_create_research_participant(user_id: str, db: Optional[Session] = Non
             select(ResearchParticipant).where(ResearchParticipant.user_id == user_id)
         ).scalar_one_or_none()
         if row is None:
+            # FIX (A-2): this is the root creation point for research
+            # records. Independently verify study-participation consent
+            # server-side before creating anything — never trust a
+            # client-supplied flag. (Reading an *existing* participant
+            # below is not gated here; only creation is.)
+            consent = get_study_consent(user_id, db)
+            if not (consent and consent.get("granted")):
+                raise StudyConsentRequired(
+                    "Study-participation consent is required before a research "
+                    "record can be created for this student."
+                )
             participant_id = _next_participant_id(db)
             sequence_order = FIXED_METHOD_SEQUENCE
             row = ResearchParticipant(
@@ -385,8 +456,19 @@ def get_completed_video_context(study_session_id: str) -> dict:
         db.close()
 
 
-def get_completed_video_behavioral_score(study_session_id: str) -> float:
-    """Average only observations for videos actually completed in this study."""
+def get_completed_video_behavioral_score(study_session_id: str) -> Optional[float]:
+    """Average only observations for videos actually completed in this study.
+
+    FIX (D-4 follow-up): this used to return 50.0 for "no completed videos"
+    and "no attention logs" alike — indistinguishable from a genuine 50%
+    measurement by the time it reached compute_crs(). That silently
+    defeated the behavioral_cue source flag added in ml/crs.py (SAP
+    section 9's "source flags" requirement): a student who never granted
+    camera consent looked identical, in the stored decision record, to
+    one whose camera genuinely measured 50%. Returns None for "no genuine
+    data" instead — callers (adaptive_engine / compute_crs) already treat
+    None as "apply the documented neutral default and flag it as such."
+    """
     db = _session()
     try:
         completed_ids = {
@@ -398,12 +480,12 @@ def get_completed_video_behavioral_score(study_session_id: str) -> float:
             ).all()
         }
         if not completed_ids:
-            return 50.0
+            return None
         logs = db.execute(
             select(AttentionLog).where(AttentionLog.study_session_id == study_session_id)
         ).scalars().all()
         scores = [float(log.score) for log in logs if log.video_id in completed_ids and log.score is not None]
-        return sum(scores) / len(scores) if scores else 50.0
+        return sum(scores) / len(scores) if scores else None
     finally:
         db.close()
 
